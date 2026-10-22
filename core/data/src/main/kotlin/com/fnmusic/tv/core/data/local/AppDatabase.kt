@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
@@ -25,7 +26,11 @@ data class AccountStateEntity(
     val updatedAt: Long,
 )
 
-@Entity(tableName = "cache_page", primaryKeys = ["namespace", "sourceKey", "page"])
+@Entity(
+    tableName = "cache_page",
+    primaryKeys = ["namespace", "sourceKey", "page"],
+    indices = [Index(value = ["accessedAt"])],
+)
 data class CachedPageEntity(
     val namespace: String,
     val sourceKey: String,
@@ -36,7 +41,11 @@ data class CachedPageEntity(
     val accessedAt: Long,
 )
 
-@Entity(tableName = "cache_lyric", primaryKeys = ["namespace", "trackGuid"])
+@Entity(
+    tableName = "cache_lyric",
+    primaryKeys = ["namespace", "trackGuid"],
+    indices = [Index(value = ["accessedAt"])],
+)
 data class CachedLyricEntity(
     val namespace: String,
     val trackGuid: String,
@@ -44,7 +53,11 @@ data class CachedLyricEntity(
     val accessedAt: Long,
 )
 
-@Entity(tableName = "cache_matched_lyric", primaryKeys = ["namespace", "trackGuid"])
+@Entity(
+    tableName = "cache_matched_lyric",
+    primaryKeys = ["namespace", "trackGuid"],
+    indices = [Index(value = ["accessedAt"])],
+)
 data class CachedMatchedLyricEntity(
     val namespace: String,
     val trackGuid: String,
@@ -52,7 +65,11 @@ data class CachedMatchedLyricEntity(
     val accessedAt: Long,
 )
 
-@Entity(tableName = "cache_index", primaryKeys = ["namespace", "indexKey"])
+@Entity(
+    tableName = "cache_index",
+    primaryKeys = ["namespace", "indexKey"],
+    indices = [Index(value = ["accessedAt"])],
+)
 data class CachedIndexEntity(
     val namespace: String,
     val indexKey: String,
@@ -129,16 +146,16 @@ interface AppDao {
     @Query("UPDATE cache_index SET accessedAt = :accessedAt WHERE namespace = :namespace AND indexKey = :indexKey")
     suspend fun touchIndex(namespace: String, indexKey: String, accessedAt: Long)
 
-    @Query("SELECT COALESCE(SUM(length(payload)), 0) FROM cache_page")
+    @Query("SELECT COALESCE(SUM(length(CAST(payload AS BLOB))), 0) FROM cache_page")
     suspend fun pagePayloadBytes(): Long
 
-    @Query("SELECT COALESCE(SUM(length(payload)), 0) FROM cache_lyric")
+    @Query("SELECT COALESCE(SUM(length(CAST(payload AS BLOB))), 0) FROM cache_lyric")
     suspend fun lyricPayloadBytes(): Long
 
-    @Query("SELECT COALESCE(SUM(length(payload)), 0) FROM cache_matched_lyric")
+    @Query("SELECT COALESCE(SUM(length(CAST(payload AS BLOB))), 0) FROM cache_matched_lyric")
     suspend fun matchedLyricPayloadBytes(): Long
 
-    @Query("SELECT COALESCE(SUM(length(payload)), 0) FROM cache_index")
+    @Query("SELECT COALESCE(SUM(length(CAST(payload AS BLOB))), 0) FROM cache_index")
     suspend fun indexPayloadBytes(): Long
 
     @Query("DELETE FROM cache_page WHERE rowid IN (SELECT rowid FROM cache_page ORDER BY accessedAt ASC LIMIT :count)")
@@ -189,7 +206,7 @@ interface AppDao {
         CachedMatchedLyricEntity::class,
         CachedIndexEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -223,9 +240,18 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cache_page_accessedAt ON cache_page(accessedAt)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cache_lyric_accessedAt ON cache_lyric(accessedAt)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cache_matched_lyric_accessedAt ON cache_matched_lyric(accessedAt)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cache_index_accessedAt ON cache_index(accessedAt)")
+            }
+        }
+
         fun create(context: Context): AppDatabase = Room.databaseBuilder(context, AppDatabase::class.java, NAME)
             .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
             .addCallback(object : Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
                     val autoVacuum = db.query("PRAGMA auto_vacuum").use { cursor ->

@@ -30,7 +30,6 @@ dependencies {
     implementation(project(":core:model"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.media3.exoplayer)
-    implementation(libs.androidx.media3.exoplayer.hls)
     implementation(libs.androidx.media3.session)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)

@@ -88,6 +88,8 @@ import com.fnmusic.tv.core.model.AppException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+private val URL_SCHEME_PATTERN = Regex("^(https?)://", RegexOption.IGNORE_CASE)
+
 @Composable
 internal fun FnMusicApp(container: AppUiDependencies, onExitApplication: () -> Unit) {
     val session by container.sessionRepository.state.collectAsStateWithLifecycle()
@@ -186,7 +188,7 @@ private fun BrandLoading() {
                 contentDescription = null,
                 modifier = Modifier.size(54.dp),
             )
-            Text("回声台", color = FnColors.Text, fontSize = 44.sp, fontWeight = FontWeight.Bold)
+            Text("小牛音乐", color = FnColors.Text, fontSize = 44.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(12.dp))
         Text("正在载入", color = FnColors.Muted, fontSize = 24.sp)
@@ -257,7 +259,7 @@ internal fun LoginScreen(
                 .semantics { contentDescription = "登录表单" },
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Text("回声台", color = FnColors.Teal, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text("小牛音乐", color = FnColors.Teal, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Text("登录", color = FnColors.Text, fontSize = 34.sp, fontWeight = FontWeight.Bold)
             Row(
                 Modifier.fillMaxWidth(),
@@ -268,7 +270,7 @@ internal fun LoginScreen(
                     value = server,
                     onValueChange = {
                         server = it
-                        Regex("^(https?)://", RegexOption.IGNORE_CASE).find(it.trim())
+                        URL_SCHEME_PATTERN.find(it.trim())
                             ?.groupValues?.get(1)
                             ?.let { scheme -> https = scheme.equals("https", ignoreCase = true) }
                         selectedProfileId = null

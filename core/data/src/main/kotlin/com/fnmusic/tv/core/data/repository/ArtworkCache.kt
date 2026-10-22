@@ -23,6 +23,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -59,6 +60,10 @@ internal class ArtworkCache(
     private val memory = LinkedHashMap<Key, ByteArray>(16, 0.75f, true)
     private val flights = mutableMapOf<Key, Flight>()
     private val namespaceGenerations = mutableMapOf<String, Long>()
+
+    // stateMutex-guarded; lets frequent memory hits coalesce disk mtime refreshes into rare
+    // background touches instead of one synchronous stat+setLastModified per grid frame.
+    private val touchedAt = mutableMapOf<Key, Long>()
     private var globalGeneration = 0L
     private var memoryBytes = 0
     private var trackedDiskBytes: Long? = null
@@ -76,6 +81,7 @@ internal class ArtworkCache(
         val flight = stateMutex.withLock {
             memory[key]?.let { bytes ->
                 memoryHit = bytes
+                scheduleTouchLocked(key)
                 null
             } ?: run {
                 val generation = generationOf(namespace)
@@ -91,7 +97,6 @@ internal class ArtworkCache(
             }
         }
         memoryHit?.let { bytes ->
-            touch(fileFor(key))
             return bytes
         }
         val activeFlight = requireNotNull(flight)
@@ -135,6 +140,7 @@ internal class ArtworkCache(
             val canceled = stateMutex.withLock {
                 globalGeneration += 1L
                 memory.clear()
+                touchedAt.clear()
                 memoryBytes = 0
                 flights.values.map(Flight::deferred).also { flights.clear() }
             }
@@ -287,10 +293,19 @@ internal class ArtworkCache(
         memoryBytes += bytes.size
         val iterator = memory.iterator()
         while (memoryBytes > memoryCapacityBytes && iterator.hasNext()) {
-            val (_, removed) = iterator.next()
+            val (removedKey, removed) = iterator.next()
             memoryBytes -= removed.size
+            touchedAt.remove(removedKey)
             iterator.remove()
         }
+    }
+
+    private fun scheduleTouchLocked(key: Key) {
+        val now = clock()
+        val last = touchedAt[key]
+        if (last != null && now - last < TOUCH_MIN_INTERVAL_MS) return
+        touchedAt[key] = now
+        scope.launch { touch(fileFor(key)) }
     }
 
     private suspend fun deleteDisk(key: Key) {
@@ -359,6 +374,7 @@ internal class ArtworkCache(
             val (key, value) = iterator.next()
             if (predicate(key)) {
                 memoryBytes -= value.size
+                touchedAt.remove(key)
                 iterator.remove()
             }
         }
@@ -413,5 +429,6 @@ internal class ArtworkCache(
 
     private companion object {
         val TEMP_SEQUENCE = AtomicLong()
+        const val TOUCH_MIN_INTERVAL_MS = 60_000L
     }
 }

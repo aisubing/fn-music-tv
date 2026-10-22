@@ -250,7 +250,7 @@ class OnlineLyricsResolverTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default).also(scopes::add)
         return OnlineLyricsResolver(
             localStore = localStore,
-            responses = SerializedResponseCache(64 * 1024, scope),
+            responses = DecodedResponseCache(64 * 1024, scope),
             namespace = { "server:user" },
             matcher = { matcher() },
             now = now,

@@ -21,7 +21,6 @@ import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -246,7 +245,7 @@ class TrimMusicApiTest {
         assertEquals("/music/api/v1/user/me", server.takeRequest().target)
     }
 
-    @Test fun `http1 requests close their connection without transport retries`() = runBlocking {
+    @Test fun `http1 requests reuse one pooled connection without a close header`() = runBlocking {
         repeat(2) {
             server.enqueue(
                 MockResponse.Builder()
@@ -264,11 +263,9 @@ class TrimMusicApiTest {
 
         val first = server.takeRequest()
         val second = server.takeRequest()
-        assertEquals("close", first.headers["Connection"])
-        assertEquals("close", second.headers["Connection"])
-        assertNotEquals(first.connectionIndex, second.connectionIndex)
+        assertEquals(first.connectionIndex, second.connectionIndex)
         assertEquals(2, server.requestCount)
-        assertFalse(client.retryOnConnectionFailure)
+        assertTrue(client.retryOnConnectionFailure)
     }
 
     @Test fun `cover json responses decode api envelopes without becoming transient failures`() {
@@ -299,23 +296,37 @@ class TrimMusicApiTest {
     }
 
     @Test fun `http status classification distinguishes retryable and terminal requests`() {
-        data class Case(val response: MockResponse, val error: AppError, val retryable: Boolean)
+        data class Case(
+            val response: MockResponse,
+            val error: AppError,
+            val retryable: Boolean,
+            val extraResponse: MockResponse? = null,
+        )
         val cases = listOf(
-            Case(MockResponse.Builder().code(401).build(), AppError.Unauthenticated, false),
-            Case(MockResponse.Builder().code(404).build(), AppError.NotFound, false),
+            Case(MockResponse.Builder().code(401).body("").build(), AppError.Unauthenticated, false),
+            Case(MockResponse.Builder().code(404).body("").build(), AppError.NotFound, false),
             Case(
-                MockResponse.Builder().code(302).addHeader("Location", "/elsewhere").build(),
+                MockResponse.Builder().code(302).body("").addHeader("Location", "/elsewhere").build(),
                 AppError.NetworkUnavailable,
                 false,
             ),
-            Case(MockResponse.Builder().code(408).build(), AppError.NetworkUnavailable, true),
-            Case(MockResponse.Builder().code(429).build(), AppError.NetworkUnavailable, true),
-            Case(MockResponse.Builder().code(500).build(), AppError.NetworkUnavailable, true),
-            Case(MockResponse.Builder().code(400).build(), AppError.NetworkUnavailable, false),
+            // 408 additionally receives one automatic transport-level retry while
+            // retryOnConnectionFailure is enabled, so it consumes a second response.
+            Case(
+                MockResponse.Builder().code(408).body("").build(),
+                AppError.NetworkUnavailable,
+                true,
+                extraResponse = MockResponse.Builder().code(408).body("").build(),
+            ),
+            Case(MockResponse.Builder().code(429).body("").build(), AppError.NetworkUnavailable, true),
+            Case(MockResponse.Builder().code(500).body("").build(), AppError.NetworkUnavailable, true),
+            Case(MockResponse.Builder().code(400).body("").build(), AppError.NetworkUnavailable, false),
         )
 
+        var expectedRequestCount = 0
         cases.forEachIndexed { index, case ->
             server.enqueue(case.response)
+            case.extraResponse?.let(server::enqueue)
 
             val error = assertThrows(AppException::class.java) {
                 runBlocking { api().cover("cover-$index", 320) }
@@ -323,13 +334,14 @@ class TrimMusicApiTest {
 
             assertEquals(case.error, error.error)
             assertEquals(case.retryable, error.isRetryableRequestFailure)
-            assertEquals(index + 1, server.requestCount)
+            expectedRequestCount += 1 + (if (case.extraResponse != null) 1 else 0)
+            assertEquals(expectedRequestCount, server.requestCount)
         }
     }
 
     @Test fun `current resource retry succeeds within three transient requests`() = runBlocking {
-        server.enqueue(MockResponse.Builder().code(408).build())
-        server.enqueue(MockResponse.Builder().code(429).build())
+        server.enqueue(MockResponse.Builder().code(408).body("").build())
+        server.enqueue(MockResponse.Builder().code(429).body("").build())
         server.enqueue(
             MockResponse.Builder()
                 .addHeader("Content-Type", "image/jpeg")
@@ -346,7 +358,7 @@ class TrimMusicApiTest {
     }
 
     @Test fun `current resource retry stops after three server failures`() {
-        repeat(3) { server.enqueue(MockResponse.Builder().code(503).build()) }
+        repeat(3) { server.enqueue(MockResponse.Builder().code(503).body("").build()) }
         server.enqueue(
             MockResponse.Builder()
                 .addHeader("Content-Type", "image/jpeg")
@@ -369,9 +381,9 @@ class TrimMusicApiTest {
 
     @Test fun `current resource retry makes one request for terminal and invalid cover responses`() {
         val responses = listOf(
-            MockResponse.Builder().code(401).build(),
-            MockResponse.Builder().code(404).build(),
-            MockResponse.Builder().code(302).addHeader("Location", "/elsewhere").build(),
+            MockResponse.Builder().code(401).body("").build(),
+            MockResponse.Builder().code(404).body("").build(),
+            MockResponse.Builder().code(302).body("").addHeader("Location", "/elsewhere").build(),
             MockResponse.Builder().addHeader("Content-Type", "image/jpeg").build(),
             MockResponse.Builder()
                 .addHeader("Content-Type", "application/json")

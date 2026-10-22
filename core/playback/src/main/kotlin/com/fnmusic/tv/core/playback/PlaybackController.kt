@@ -18,6 +18,7 @@ import com.fnmusic.tv.core.model.PlaybackTrack
 import com.fnmusic.tv.core.model.RoamWindow
 import com.fnmusic.tv.core.model.Track
 import com.fnmusic.tv.core.model.playback.NowPlayingIdentity
+import com.fnmusic.tv.core.model.playback.MAX_ACTIVE_QUEUE_ITEMS
 import com.fnmusic.tv.core.model.playback.PlayMode
 import com.fnmusic.tv.core.model.playback.PlaybackQueueItem
 import com.fnmusic.tv.core.model.playback.QueueKind
@@ -51,6 +52,8 @@ internal data class QueueRemovalPlan(
     val remainingCount: Int,
     val nextCurrentIndex: Int?,
 )
+
+private data class PrefetchedRoamTrack(val guid: String, val prepared: PlaybackTrack)
 
 internal fun queueRemovalPlan(
     itemCount: Int,
@@ -87,6 +90,7 @@ class PlaybackController(
     )
     private val snapshotPersistence = PlaybackSnapshotPersistence(scope, snapshotWriter)
     private var controller: MediaController? = null
+    private var connecting = false
     private var ticker: Job? = null
     private var queuePageJob: Job? = null
     private var roamJob: Job? = null
@@ -98,11 +102,15 @@ class PlaybackController(
     private var presentationRevision = 0L
     private var lastPresentationKey: PresentationKey? = null
     private var lastSnapshotAt = 0L
+    private var lastCheckpointPositionMs = Long.MIN_VALUE
+    private var lastCheckpointedIntent: PlaybackPlayIntent? = null
     private var queueKind = QueueKind.Normal
     private var playMode = PlayMode.ListRepeat
     private var shuffleOrderIds: List<String> = emptyList()
     private var pendingShuffle: PendingShuffleActivation? = null
     private var frozenQueueSnapshot: PlaybackSnapshot? = null
+    private var prefetchedRoam: PrefetchedRoamTrack? = null
+    private var prefetchSequence = 0L
     private var queueSource: QueueSource? = null
     private var queueWindow: SlidingQueueState? = null
     private var failedDirection: QueueDirection? = null
@@ -111,7 +119,7 @@ class PlaybackController(
     private var currentRoamId: String? = null
     private var roamError: AppError? = null
     private var failedRoamDirection: RoamDirection? = null
-    private val queueProjector = PlaybackQueueProjector(MAX_QUEUE_ITEMS)
+    private val queueProjector = PlaybackQueueProjector(MAX_ACTIVE_QUEUE_ITEMS)
     private var forceNextPresentationProjection = false
     private val autoAdvanceGate = RoamAutoAdvanceGate()
 
@@ -161,11 +169,15 @@ class PlaybackController(
             }
         }
         PlaybackTransportBridge.setOwnership(PlaybackTransportOwnership.Restoring)
-        if (controller != null) return
+        if (controller != null || connecting) return
+        // Without this flag two rapid calls each build a MediaController and the first one —
+        // still awaiting its future — leaks its service binder and listener.
+        connecting = true
         val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
         val future = MediaController.Builder(context, token).buildAsync()
         future.addListener(
             {
+                connecting = false
                 runCatching { future.get() }.onSuccess { mediaController ->
                     controller = mediaController
                     mediaController.addListener(listener)
@@ -326,6 +338,9 @@ class PlaybackController(
                 failedDirection = null
                 queueError = null
                 installRoamTrack(player, resolved.track, autoPlay = true)
+                // beginStructuralTransition already advanced the generation above, so guard
+                // against the current one; the captured pre-transition value would never match.
+                scheduleRoamPrefetch(resolved.window, generation)
                 PlaybackTransportBridge.setOwnership(PlaybackTransportOwnership.Roam)
                 structuralSnapshot(player)?.awaitCommitted()
                 updateRoamStatus(busy = false, error = null)
@@ -940,6 +955,7 @@ class PlaybackController(
                 roamWindow = resolved.window
                 currentRoamId = installedRoamId
                 installRoamTrack(player, resolved.track, autoPlay = true)
+                scheduleRoamPrefetch(resolved.window, expectedGeneration)
                 structuralSnapshot(player)?.awaitCommitted()
                 autoAdvanceGate.reset()
                 updateRoamStatus(busy = false, error = null)
@@ -987,7 +1003,15 @@ class PlaybackController(
         ensureCurrent = {
             if (generation != expectedGeneration) throw CancellationException("Playback session changed")
         },
-        prepare = { window -> contentSource.prepare(window.current.track) },
+        prepare = { window ->
+            val prefetch = prefetchedRoam
+            if (prefetch != null && prefetch.guid == window.current.track.guid.value) {
+                prefetchedRoam = null
+                prefetch.prepared
+            } else {
+                contentSource.prepare(window.current.track)
+            }
+        },
         move = { requestedDirection, roamId ->
             when (requestedDirection) {
                 RoamDirection.Next -> contentSource.nextRoam(roamId)
@@ -995,6 +1019,20 @@ class PlaybackController(
             }
         },
     )
+
+    // Warms the metadata/stream-URL resolution for the window's next track so the next roam
+    // advance (user or auto) skips one server round trip and the gap between tracks shrinks.
+    private fun scheduleRoamPrefetch(window: RoamWindow?, expectedGeneration: Long) {
+        prefetchedRoam = null
+        val nextTrack = window?.next?.track ?: return
+        val token = ++prefetchSequence
+        scope.launch {
+            val prepared = runCatching { contentSource.prepare(nextTrack) }.getOrNull() ?: return@launch
+            if (generation == expectedGeneration && token == prefetchSequence) {
+                prefetchedRoam = PrefetchedRoamTrack(nextTrack.guid.value, prepared)
+            }
+        }
+    }
 
     private fun installRoamTrack(player: MediaController, track: PlaybackTrack, autoPlay: Boolean) {
         player.setMediaItem(mediaItem(track))
@@ -1074,6 +1112,8 @@ class PlaybackController(
     private fun beginStructuralTransition(cancelRoam: Boolean = true) {
         generation++
         pendingShuffle = null
+        prefetchedRoam = null
+        prefetchSequence++
         queuePageJob?.cancel()
         queuePageJob = null
         if (cancelRoam) {
@@ -1086,6 +1126,8 @@ class PlaybackController(
 
     private fun startTicker() {
         ticker?.cancel()
+        lastCheckpointPositionMs = Long.MIN_VALUE
+        lastCheckpointedIntent = null
         ticker = scope.launch {
             while (isActive) {
                 controller?.let { player ->
@@ -1155,9 +1197,24 @@ class PlaybackController(
 
     private fun checkpointSnapshot(player: Player, force: Boolean = false) {
         val now = System.currentTimeMillis()
-        if (!force && now - lastSnapshotAt < SNAPSHOT_INTERVAL_MS) return
+        if (!force) {
+            if (now - lastSnapshotAt < SNAPSHOT_INTERVAL_MS) return
+            // A paused player whose position and play intent have not moved keeps its on-disk
+            // snapshot valid; writing it again every interval only wears flash on a long-lived
+            // TV process. The intent must still land once or restore would resume auto-playing.
+            val intent = if (player.playWhenReady) PlaybackPlayIntent.Play else PlaybackPlayIntent.Pause
+            if (!player.isPlaying &&
+                player.currentPosition == lastCheckpointPositionMs &&
+                intent == lastCheckpointedIntent
+            ) {
+                return
+            }
+        }
         if (pendingShuffle != null) return
         lastSnapshotAt = now
+        lastCheckpointPositionMs = player.currentPosition
+        lastCheckpointedIntent =
+            if (player.playWhenReady) PlaybackPlayIntent.Play else PlaybackPlayIntent.Pause
         val namespace = currentNamespace ?: return
         val revision = ++snapshotRevision
         snapshotPersistence.enqueueCheckpoint(
@@ -1196,7 +1253,7 @@ class PlaybackController(
     ): PlaybackSnapshot = PlaybackSnapshot(
         generation = generation,
         revision = revision,
-        items = List(player.mediaItemCount.coerceAtMost(MAX_QUEUE_ITEMS)) { index -> player.getMediaItemAt(index) },
+        items = List(player.mediaItemCount.coerceAtMost(MAX_ACTIVE_QUEUE_ITEMS)) { index -> player.getMediaItemAt(index) },
         index = player.currentMediaItemIndex.coerceAtLeast(0),
         positionMs = player.currentPosition.coerceAtLeast(0),
         source = queueSource,
@@ -1251,12 +1308,6 @@ class PlaybackController(
         return snapshot.shuffleOrder.takeIf { restoreShuffle }
     }
 
-    private fun mediaExtras(audioFormat: String?, coverId: String?, durationMs: Long?): Bundle = Bundle().apply {
-        audioFormat?.takeIf(String::isNotBlank)?.let { putString(AUDIO_FORMAT_KEY, it) }
-        coverId?.takeIf(String::isNotBlank)?.let { putString(COVER_ID_KEY, it) }
-        durationMs?.takeIf { it > 0L }?.let { putLong(DECLARED_DURATION_MS_KEY, it) }
-    }
-
 
     private fun presentationKey(item: MediaItem): PresentationKey {
         val captured = requireNotNull(captureNowPlayingFields(item))
@@ -1298,9 +1349,10 @@ class PlaybackController(
     private companion object {
         const val PAGE_SIZE = 50
         const val PREFETCH_DISTANCE = 15
-        const val MAX_QUEUE_ITEMS = 250
         const val PROGRESS_TICK_MS = 250L
-        const val SNAPSHOT_INTERVAL_MS = 5_000L
+        // Process death may roll the restored position back by at most this interval; normal
+        // exits persist an exact snapshot through stopForAppExit instead.
+        const val SNAPSHOT_INTERVAL_MS = 15_000L
         const val PREVIOUS_RESTART_THRESHOLD_MS = 3_000L
         val QUEUE_RETRY_DELAYS = longArrayOf(500L, 1_000L, 2_000L)
     }

@@ -20,19 +20,23 @@ internal data class ResponseCacheKey(
     val page: Int? = null,
 )
 
-internal class SerializedResponseCache(
+// Retains already-decoded responses so a memory hit returns them without re-parsing; the encoded
+// form exists only to size entries and feed the Room persistence tier. A key's value type is fixed
+// by the call-site kind that owns it ("page", "index", "lyric", "matched-lyrics").
+internal class DecodedResponseCache(
     private val capacityBytes: Int,
     private val scope: CoroutineScope,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     init {
         require(capacityBytes > 0)
     }
 
-    private data class Entry(val payload: String, val sizeBytes: Int)
+    private data class Entry(val value: Any, val sizeBytes: Int, val storedAtMs: Long)
     private data class Generation(val global: Long, val namespace: Long)
     private data class Flight(
         val generation: Generation,
-        val deferred: Deferred<String>,
+        val deferred: Deferred<Any>,
         val persist: suspend (String) -> Unit,
         var waiters: Int,
     )
@@ -45,16 +49,20 @@ internal class SerializedResponseCache(
     private var globalGeneration = 0L
     private var retainedBytes = 0
 
-    suspend fun getOrFetch(
+    suspend fun <T : Any> getOrFetch(
         key: ResponseCacheKey,
-        isRetainedValid: (String) -> Boolean = { true },
+        encode: (T) -> String,
+        isRetainedValid: (T) -> Boolean = { true },
+        maxAgeMs: Long = Long.MAX_VALUE,
         persist: suspend (String) -> Unit = {},
-        fetch: suspend () -> String,
-    ): String {
+        fetch: suspend () -> T,
+    ): T {
         var created = false
         val flight = mutex.withLock {
             entries[key]?.let { entry ->
-                if (isRetainedValid(entry.payload)) return entry.payload
+                @Suppress("UNCHECKED_CAST")
+                val value = entry.value as T
+                if (isRetainedValid(value) && clock() - entry.storedAtMs <= maxAgeMs) return value
                 entries.remove(key)
                 retainedBytes -= entry.sizeBytes
             }
@@ -69,7 +77,10 @@ internal class SerializedResponseCache(
         }
         if (created) flight.deferred.start()
         return try {
-            flight.deferred.await().also { payload -> accept(key, flight, payload) }
+            @Suppress("UNCHECKED_CAST")
+            val value = flight.deferred.await() as T
+            accept(key, flight, value, encode(value))
+            value
         } finally {
             withContext(NonCancellable) { detach(key, flight) }
         }
@@ -114,7 +125,7 @@ internal class SerializedResponseCache(
     internal suspend fun retainedByteCount(): Int = mutex.withLock { retainedBytes }
     internal suspend fun waiterCount(key: ResponseCacheKey): Int = mutex.withLock { flights[key]?.waiters ?: 0 }
 
-    private suspend fun accept(key: ResponseCacheKey, flight: Flight, payload: String) {
+    private suspend fun accept(key: ResponseCacheKey, flight: Flight, value: Any, encoded: String) {
         currentCoroutineContext().ensureActive()
         acceptanceMutex.withLock {
             currentCoroutineContext().ensureActive()
@@ -124,11 +135,11 @@ internal class SerializedResponseCache(
             }
             if (alreadyAccepted) return@withLock
 
-            flight.persist(payload)
+            flight.persist(encoded)
             currentCoroutineContext().ensureActive()
             mutex.withLock {
                 ensureAcceptable(key, flight)
-                put(key, payload)
+                put(key, value, encoded)
             }
         }
     }
@@ -162,9 +173,9 @@ internal class SerializedResponseCache(
         namespace = namespaceGenerations[namespace] ?: 0L,
     )
 
-    private fun put(key: ResponseCacheKey, payload: String) {
+    private fun put(key: ResponseCacheKey, value: Any, encoded: String) {
         entries.remove(key)?.let { retainedBytes -= it.sizeBytes }
-        val entry = Entry(payload, payload.toByteArray(Charsets.UTF_8).size)
+        val entry = Entry(value, encoded.toByteArray(Charsets.UTF_8).size, clock())
         entries[key] = entry
         retainedBytes += entry.sizeBytes
         val iterator = entries.iterator()

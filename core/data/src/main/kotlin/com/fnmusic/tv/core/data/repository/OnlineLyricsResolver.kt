@@ -29,7 +29,7 @@ import kotlinx.serialization.encodeToString
 
 internal class OnlineLyricsResolver(
     private val localStore: LocalStore,
-    private val responses: SerializedResponseCache,
+    private val responses: DecodedResponseCache,
     private val namespace: () -> String,
     private val matcher: suspend (LyricsMatchRequest) -> LyricsMatchResult,
     private val now: () -> Long = System::currentTimeMillis,
@@ -44,9 +44,10 @@ internal class OnlineLyricsResolver(
             businessKey = "${track.guid.value}:$fingerprint",
         )
         var shouldPersist = false
-        val payload = responses.getOrFetch(
+        val envelope = responses.getOrFetch(
             key = key,
-            isRetainedValid = { encoded -> encoded.decodeEnvelope()?.accepts(fingerprint, now()) == true },
+            encode = { ApiDecoder.json.encodeToString(it) },
+            isRetainedValid = { retained -> retained.accepts(fingerprint, now()) },
             persist = { encoded ->
                 if (shouldPersist) {
                     try {
@@ -71,7 +72,6 @@ internal class OnlineLyricsResolver(
                 ?.payload
                 ?.decodeEnvelope()
                 ?.takeIf { it.accepts(fingerprint, currentTime) }
-                ?.let(ApiDecoder.json::encodeToString)
                 ?: when (val result = matcher(track.toLyricsMatchRequest())) {
                     is LyricsMatchResult.Found -> MatchedLyricsEnvelope(
                         schemaVersion = MATCHED_LYRICS_SCHEMA_VERSION,
@@ -88,10 +88,10 @@ internal class OnlineLyricsResolver(
                     LyricsMatchResult.NetworkFailure,
                     LyricsMatchResult.InvalidResponse,
                     -> throw OnlineLyricsUnavailableException()
-                }.also { shouldPersist = true }.let(ApiDecoder.json::encodeToString)
+                }.also { shouldPersist = true }
         }
-        return payload.decodeEnvelope()
-            ?.takeIf { it.accepts(fingerprint, now()) }
+        return envelope
+            .takeIf { it.accepts(fingerprint, now()) }
             ?.matched
             ?.toCurrentLyrics(track.guid.value)
     }

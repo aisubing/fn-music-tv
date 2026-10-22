@@ -51,13 +51,16 @@ data class ResponseCacheKey(
     val businessKey: String,
     val page: Int? = null,
 )
-SerializedResponseCache.getOrFetch(
+DecodedResponseCache.getOrFetch(
     key: ResponseCacheKey,
+    encode: (T) -> String,
+    isRetainedValid: (T) -> Boolean = { true },
+    maxAgeMs: Long = Long.MAX_VALUE,
     persist: suspend (String) -> Unit = {},
-    fetch: suspend () -> String,
-): String
-SerializedResponseCache.invalidateNamespace(namespace: String)
-SerializedResponseCache.invalidateAll()
+    fetch: suspend () -> T,
+): T
+DecodedResponseCache.invalidateNamespace(namespace: String)
+DecodedResponseCache.invalidateAll()
 
 MusicRepository.invalidateNamespace(namespace: String, includeEssential: Boolean = false)
 MusicRepository.clearAllEvictableCaches()
@@ -161,8 +164,10 @@ Command failures use `SessionError` codes, not removed `SessionResult.RESULT_ERR
   `FN_CONNECT_AUTHX_PREFIX` and `FN_CONNECT_API_KEY` environment variables. A non-cacheable Gradle
   task emits randomized encrypted byte payloads below `core/data/build/generated`; tracked source,
   Android resources, manifests, `BuildConfig` strings, workflow arguments, and logs never contain
-  the plaintext values. Debug and test compilation may use an explicitly unconfigured generated
-  provider, while Release compilation fails closed when either variable is absent.
+  the plaintext values. Debug, test, and Release compilation may all use an explicitly
+  unconfigured generated provider (`isConfigured=false`): FNID lookups then fail with
+  `FnIdUnavailable` and a clear user-facing message while direct connections keep working.
+  The two variables must always be provided as a complete pair or a complete absence.
 - The generated decoder is static-analysis resistance, not a trust boundary: it reconstructs
   temporary byte arrays only for the existing MD5 request-signing input, and the signer clears those
   arrays in `finally`. The request path, nonce range, millisecond timestamp, body digest, separators,
@@ -191,11 +196,11 @@ Command failures use `SessionError` codes, not removed `SessionResult.RESULT_ERR
   never call Android Keystore reads on the main thread.
 - API code `120001`/`99999` maps to `Unauthenticated`; `120002` maps to `AccountDisabled`;
   `100005` maps to `NotFound`.
-- API clients keep automatic redirects and OkHttp transport retries disabled. Relay requests may
-  manually follow at most five redirects while preserving relay, access-code, and auth headers.
-  Their network interceptor adds
-  `Connection: close` only to HTTP/1.1 requests so a FNOS nginx idle timeout cannot leave a stale
-  pooled socket for the next logical request. HTTP/2 and Media3 audio streaming are unaffected.
+- API clients keep automatic redirects disabled. Relay requests may manually follow at most five
+  redirects while preserving relay, access-code, and auth headers. OkHttp transport retries stay
+  enabled and pooled HTTP/1.1 connections retire after a short idle window, so a socket the FNOS
+  nginx already dropped via its idle timeout is transparently replaced on a fresh connection and
+  no stale-connection error reaches callers. HTTP/2 and Media3 audio streaming are unaffected.
 - `SessionRepository.restore()` contains server discovery, `me()`, saved-digest fallback login,
   user mapping, and signed-in publication in one exception boundary. Cancellation is always
   rethrown. An invalid token is cleared and falls back once to the same profile's saved digest;
@@ -229,9 +234,12 @@ Command failures use `SessionError` codes, not removed `SessionResult.RESULT_ERR
 - Every cache key and persisted record is namespaced by `serverGuid:userGuid`. The process response
   key is exactly `(namespace, kind, businessKey, page)`; a business key without a namespace is
   invalid.
-- `MusicRepository` retains at most 8 MiB of validated serialized UTF-8 response payloads in an
-  access-ordered process-lifetime LRU. Retained entries have no TTL. Eviction, explicit clear,
-  or process death permits a later NAS request.
+- `MusicRepository` retains at most 8 MiB of validated, already-decoded responses in an
+  access-ordered process-lifetime LRU; the encoded UTF-8 form only sizes entries and feeds the
+  Room persistence tier, so a memory hit performs no JSON parsing. Page, index, and lyric entries
+  expire from memory after a 10-minute TTL (the next visit refetches); matched-lyrics entries use
+  their own fingerprint/expiry validity instead. Eviction, explicit clear, or process death
+  permits a later NAS request.
 - Read order is process memory, join/start the keyed in-flight request, NAS, then memory plus
   best-effort Room persistence. A `NetworkUnavailable` NAS result may fall back to a valid Room
   page/index/lyric payload and seed the process cache. Stateful roam requests never enter this
@@ -285,7 +293,7 @@ Command failures use `SessionError` codes, not removed `SessionResult.RESULT_ERR
   budget, when the user applies a lower budget, or when error recovery invalidates the ledger.
 - A network or validated Room fallback DTO decoded during one repository call is reused for
   persistence metadata and the returned domain projection. Process-cache hits from another call
-  still decode their serialized payload once; serialized cache and Room formats do not change.
+  reuse the retained decoded value directly; Room formats do not change.
 - `invalidateNamespace(namespace, includeEssential=false)` clears that namespace's response memory,
   in-flight work, artwork memory/files, and evictable Room rows while preserving its account row.
   Logout/auth invalidation may pass `includeEssential=true`. `clearAllEvictableCaches()` invalidates
@@ -487,8 +495,8 @@ Command failures use `SessionError` codes, not removed `SessionResult.RESULT_ERR
 | Envelope code 120002 | `AppException(AccountDisabled)`, terminal, token invalidation |
 | Remembered-token `me()` returns unauthenticated with a complete profile | Clear only its token; perform one saved-digest login and replace the token on success |
 | Saved-digest login returns invalid credentials/access code or account disabled | Stop retrying; retain editable history and publish `SignedOut(error)` |
-| Remembered-session restore has a retryable transient failure | Retain all credentials, publish `Recovering`, and retry in-process with capped backoff |
-| HTTP/1.1 API request after an idle interval | Send `Connection: close`; use one fresh connection and no hidden retry |
+| Remembered-session restore has a retryable transient failure | Retain all credentials, publish `Recovering`, and retry in-process; after the fast backoff ladder, retry every 2 minutes |
+| HTTP/1.1 API request hits a socket the server already closed | OkHttp retries once on a fresh connection; no error reaches callers |
 | HTTP/envelope 404/100005 | `AppException(NotFound)`, terminal; current artwork/lyrics `Absent`, metadata fallback |
 | All online lyric searches succeed with no eligible candidates | `LyricsMatchResult.NotFound`, then FN fallback |
 | At least one online result is usable and other providers fail | Select the richest usable result; do not fall back |
@@ -507,9 +515,9 @@ Command failures use `SessionError` codes, not removed `SessionResult.RESULT_ERR
 | Invalid/corrupt JSON or invalid image bytes | `Unknown("invalid_json")` or `Absent`; never cache, never automatically retry |
 | Caller cancellation | Cancel its waiter; final waiter cancels upstream `Call`; rethrow `CancellationException` |
 | Namespace/global clear during a miss | Increment generation, cancel matching flight, reject every late write |
-| Retained response cache hit | Return serialized payload with no NAS call and update process LRU order |
+| Retained response cache hit | Return the decoded response with no NAS call or JSON parse; a TTL-expired entry refetches on the next visit |
 | Response cache exceeds 8 MiB | Evict least-recently-used UTF-8 payloads until within capacity |
-| Artwork memory/disk hit | Return bytes with no cover HTTP call and touch the disk entry |
+| Artwork memory hit | Return bytes with no cover HTTP call; coalesce the disk mtime refresh into at most one background touch per entry per interval |
 | Exact decoded bitmap hit | Return it synchronously on the first composition; do not show a placeholder frame |
 | Only another artwork variant is decoded | Treat as a miss; keep the stable placeholder and load the exact variant |
 | Decoded cache clear races an older load | Cancel the flight and reject its result by generation; memory stays empty |
@@ -571,6 +579,9 @@ Command failures use `SessionError` codes, not removed `SessionResult.RESULT_ERR
 - Good: the initial `0.1.0` package uses version code `2`; the `回声台` rebrand ships as `0.1.1`
   with version code `3`, reuses the fixed release certificate, and installs over the same
   `com.fnmusic.tv` package.
+- Good: the `小牛音乐` fork rebrand ships as `1.1.3` with a new applicationId `com.fnmusics.tv`
+  (coexists with upstream `com.fnmusic.tv`), while the code namespace stays `com.fnmusic.tv`;
+  `baselineprofile` `PACKAGE_NAME` and the update contracts track the applicationId.
 - Good: clearing namespace A during an artwork download cancels A, prevents its late file write, and
   leaves namespace B plus its files untouched.
 - Good: two Grid consumers for one cover join one decode; a Compact hit neither satisfies nor
@@ -604,8 +615,8 @@ Command failures use `SessionError` codes, not removed `SessionResult.RESULT_ERR
   `https://nas.example.com/music/api/v1/`, using port `443`, while an explicit custom port remains.
 - Good: FNID relay login, cover loading, and audio playback all carry the same access-code headers
   and `mode=relay`; authenticated requests additionally carry the user token cookie.
-- Good: two HTTP/1.1 API reads each carry `Connection: close`, use distinct connections, and make
-  exactly two server requests while `retryOnConnectionFailure` remains disabled.
+- Good: two HTTP/1.1 API reads reuse one pooled connection, send no `Connection: close`, and make
+  exactly two server requests; a reused socket the server closed retries once transparently.
 - Good: an expired remembered token falls back once to its saved digest and securely replaces the
   token; a startup `500` remains on `Recovering` and enters the app after the NAS becomes reachable.
 - Good: the login request contains the exact lowercase SHA-256 password hash plus the stable
@@ -671,8 +682,9 @@ Command failures use `SessionError` codes, not removed `SessionResult.RESULT_ERR
   query/fragment, and invalid hosts.
 - `ConnectionResolverTest`: direct HTTPS normalization, FNID signed lookup and candidate priority,
   access-code base64/header construction, relay cookies, and required/invalid access-code errors.
-  invalid JSON, redirects, retryable status classification, HTTP/1.1 close with distinct connection
-  indices, no transport retry, exact request count, maximum three current-resource attempts, `404`
+  invalid JSON, redirects, retryable status classification, HTTP/1.1 connection reuse without a
+  close header (including the automatic 408 follow-up), exact request count,
+  maximum three current-resource attempts, `404`
   terminal behavior, and cancellation calling `Call.cancel()`.
 - `SessionRepositoryTest`: expired-token saved-digest fallback and token replacement; transient
   restore publishes `Recovering` while retaining credentials; terminal auth stops retrying;
@@ -680,7 +692,7 @@ Command failures use `SessionError` codes, not removed `SessionResult.RESULT_ERR
   legacy token compatibility, cancellation, zero constructor reads, and IO-bound secure reads.
 - `TrimMusicApiTest`: plaintext input sends exactly one SHA-256 lowercase hex digest; the saved-hash
   entry sends the exact digest unchanged and rejects short, uppercase, or non-hex values.
-- `SerializedResponseCacheTest`: 8 MiB-equivalent byte LRU ordering, namespace isolation, same-key
+- `DecodedResponseCacheTest`: 8 MiB-equivalent byte LRU ordering, namespace isolation, same-key
   single-flight, one-of-many waiter cancellation, final-waiter upstream cancellation, failed fetch
   retryability, namespace/global generations, and late-persist rejection.
 - `ArtworkCacheTest`/`ArtworkValidationTest`: namespaced memory/disk hits, same-key single-flight,
@@ -799,20 +811,14 @@ buildTypes.release {
 ```
 
 ```kotlin
-// Wrong: a stale HTTP/1.1 socket may be reused, or a hidden transport retry can exceed request limits.
-OkHttpClient.Builder().retryOnConnectionFailure(true).build()
+// Wrong: transport retries disabled lets a reused socket the server dropped surface as a
+// user-facing error on the next request.
+OkHttpClient.Builder().retryOnConnectionFailure(false).build()
 
-// Correct: keep logical retry ownership explicit and retire only HTTP/1.1 API connections.
+// Correct: short idle retirement plus transparent transport retry absorbs the nginx idle timeout.
 OkHttpClient.Builder()
-    .retryOnConnectionFailure(false)
-    .addNetworkInterceptor { chain ->
-        val request = if (chain.connection()?.protocol() == Protocol.HTTP_1_1) {
-            chain.request().newBuilder().header("Connection", "close").build()
-        } else {
-            chain.request()
-        }
-        chain.proceed(request)
-    }
+    .connectionPool(ConnectionPool(5, 30_000L, TimeUnit.MILLISECONDS))
+    .retryOnConnectionFailure(true)
     .build()
 ```
 

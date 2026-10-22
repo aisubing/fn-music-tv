@@ -80,8 +80,32 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test fun `migration to version four adds accessedAt indexes without touching rows`() {
+        helper.createDatabase(TEST_DATABASE_V4, 3).apply {
+            execSQL(
+                "INSERT INTO cache_page (namespace, sourceKey, page, payload, total, sort, accessedAt) " +
+                    "VALUES ('server:user', 'all-tracks', 1, '页', 1, 'sort', 5)",
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(TEST_DATABASE_V4, 4, true, AppDatabase.MIGRATION_3_4).use { db ->
+            db.query("SELECT payload FROM cache_page WHERE sourceKey = 'all-tracks'").use {
+                it.moveToFirst()
+                assertEquals("页", it.getString(0))
+            }
+            db.query(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'index_cache_page_accessedAt'",
+            ).use {
+                it.moveToFirst()
+                assertEquals("index_cache_page_accessedAt", it.getString(0))
+            }
+        }
+    }
+
     private companion object {
         const val TEST_DATABASE = "migration-test.db"
         const val TEST_DATABASE_V3 = "migration-v3-test.db"
+        const val TEST_DATABASE_V4 = "migration-v4-test.db"
     }
 }

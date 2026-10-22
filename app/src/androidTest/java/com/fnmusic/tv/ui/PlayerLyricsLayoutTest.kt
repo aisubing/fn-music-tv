@@ -51,7 +51,7 @@ class PlayerLyricsLayoutTest {
                     buttonFocus.requestFocus()
                 }
                 Column {
-                    TvLyrics(testLyrics, 0L, null, loading = false, failed = false, poster = false)
+                    TvLyrics(testLyrics, { 0L }, null, loading = false, failed = false, poster = false)
                     Button(
                         onClick = {},
                         modifier = Modifier.focusRequester(buttonFocus),
@@ -72,7 +72,7 @@ class PlayerLyricsLayoutTest {
                 Box(Modifier.width(520.dp).testTag("lyrics-host")) {
                     TvLyrics(
                         SyncedLyrics(listOf(SyncedLine(longLine, null, 0, 4_000))),
-                        0L,
+                        { 0L },
                         null,
                         loading = false,
                         failed = false,
@@ -97,7 +97,7 @@ class PlayerLyricsLayoutTest {
                 positionMs = rememberTestState(0L)
                 TvLyrics(
                     lyrics = testLyrics,
-                    positionMs = positionMs.value,
+                    positionMs = { positionMs.value },
                     staticLyric = null,
                     loading = false,
                     failed = false,

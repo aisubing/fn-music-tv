@@ -16,6 +16,7 @@ import com.fnmusic.tv.core.model.playback.QueueSource
 import com.fnmusic.tv.core.model.playback.SlidingQueueState
 import org.json.JSONArray
 import org.json.JSONObject
+import com.fnmusic.tv.core.model.playback.MAX_ACTIVE_QUEUE_ITEMS
 
 internal enum class PlaybackPlayIntent { Play, Pause }
 
@@ -39,7 +40,6 @@ internal data class PlaybackSnapshot(
 
 internal object PlaybackSnapshotCodec {
     const val Version = 2
-    private const val MaxItems = 250
 
     fun encode(snapshot: PlaybackSnapshot): String = encodeSnapshot(snapshot, depth = 0).toString()
 
@@ -82,8 +82,8 @@ internal object PlaybackSnapshotCodec {
         if (!legacy) require(root.getInt("version") == Version) { "Unsupported playback snapshot version" }
 
         val itemValues = root.getJSONArray("items")
-        require(legacy || itemValues.length() <= MaxItems) { "Playback queue exceeds its active limit" }
-        val itemCount = itemValues.length().coerceAtMost(MaxItems)
+        require(legacy || itemValues.length() <= MAX_ACTIVE_QUEUE_ITEMS) { "Playback queue exceeds its active limit" }
+        val itemCount = itemValues.length().coerceAtMost(MAX_ACTIVE_QUEUE_ITEMS)
         val items = List(itemCount) { index -> decodeMediaItem(itemValues.getJSONObject(index)) }
         require(items.map(MediaItem::mediaId).distinct().size == items.size) { "Playback queue contains duplicate IDs" }
 
@@ -342,12 +342,6 @@ internal object PlaybackSnapshotCodec {
         }
     }
 
-    private fun mediaExtras(audioFormat: String?, coverId: String?, durationMs: Long?): Bundle = Bundle().apply {
-        audioFormat?.takeIf(String::isNotBlank)?.let { putString(AUDIO_FORMAT_KEY, it) }
-        coverId?.takeIf(String::isNotBlank)?.let { putString(COVER_ID_KEY, it) }
-        durationMs?.takeIf { it > 0L }?.let { putLong(DECLARED_DURATION_MS_KEY, it) }
-    }
-
     private fun isCompleteIdOrder(canonicalIds: List<String>, orderedIds: List<String>): Boolean =
         canonicalIds.size == orderedIds.size &&
             canonicalIds.distinct().size == canonicalIds.size &&
@@ -370,4 +364,10 @@ internal object PlaybackSnapshotCodec {
         takeIf { has(key) && !isNull(key) }?.getLong(key)
 
     private fun JSONArray.strings(): List<String> = List(length()) { index -> getString(index) }
+}
+
+internal fun mediaExtras(audioFormat: String?, coverId: String?, durationMs: Long?): Bundle = Bundle().apply {
+    audioFormat?.takeIf(String::isNotBlank)?.let { putString(AUDIO_FORMAT_KEY, it) }
+    coverId?.takeIf(String::isNotBlank)?.let { putString(COVER_ID_KEY, it) }
+    durationMs?.takeIf { it > 0L }?.let { putLong(DECLARED_DURATION_MS_KEY, it) }
 }

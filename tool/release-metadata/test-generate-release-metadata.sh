@@ -25,7 +25,7 @@ jq -e \
   --argjson expectedSize "$(wc -c < "$apk" | tr -d '[:space:]')" \
   --argjson expectedVersionCode "$version_code" \
   --arg expectedVersionName "$version_name" \
-  '.packageName == "com.fnmusic.tv" and
+  '.packageName == "com.fnmusics.tv" and
    .versionName == $expectedVersionName and
    .versionCode == $expectedVersionCode and
    .apk.fileName == $expectedName and

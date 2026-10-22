@@ -269,7 +269,7 @@ internal fun SettingsScreen(container: AuthenticatedAppDependencies) {
                         modifier = Modifier.size(46.dp),
                     )
                     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text("回声台", fontSize = 17.sp, lineHeight = 20.sp, fontWeight = FontWeight.Bold)
+                        Text("小牛音乐", fontSize = 17.sp, lineHeight = 20.sp, fontWeight = FontWeight.Bold)
                         Text(
                             "Android TV 飞牛音乐第三方客户端",
                             color = FnColors.Muted,

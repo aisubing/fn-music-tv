@@ -3,7 +3,7 @@ package com.fnmusic.tv.update
 import android.content.Intent
 import kotlinx.serialization.Serializable
 
-internal const val UPDATE_PACKAGE_NAME = "com.fnmusic.tv"
+internal const val UPDATE_PACKAGE_NAME = "com.fnmusics.tv"
 internal const val MAX_UPDATE_MANIFEST_BYTES = 256 * 1024
 internal const val MAX_UPDATE_NOTES_LENGTH = 4_000
 

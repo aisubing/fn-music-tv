@@ -46,6 +46,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -149,7 +150,7 @@ import kotlinx.coroutines.withContext
 import kotlin.math.pow
 import kotlin.math.sqrt
 
-private val LocalAuthenticatedDependencies = staticCompositionLocalOf<AuthenticatedAppDependencies> {
+internal val LocalAuthenticatedDependencies = staticCompositionLocalOf<AuthenticatedAppDependencies> {
     error("Missing authenticated app dependencies")
 }
 
@@ -612,7 +613,7 @@ private fun BrowseHome(
     var actionError by remember { mutableStateOf<AppError?>(null) }
     var roamActionRunning by remember { mutableStateOf(false) }
     var focusedKey by rememberSaveable { mutableStateOf<String?>(null) }
-    var initialFocusRequested by remember { mutableStateOf(false) }
+    val focusRestore = rememberFocusRestoreRequester()
     val contentFocus = remember { FocusRequester() }
     val nowPlayingFocus = remember { FocusRequester() }
     val homeTabFocus = remember { FocusRequester() }
@@ -637,9 +638,14 @@ private fun BrowseHome(
             key = { it.guid.value },
         )
     }
-    LaunchedEffect(playlistsLoaded, playback.hasMedia, focusedKey) {
-        if (initialFocusRequested) return@LaunchedEffect
-        val availableKeys = buildList {
+    FocusRestoreEffect(
+        playlistsLoaded, playback.hasMedia, focusedKey,
+        restore = focusRestore,
+        focusedKey = focusedKey,
+        onResolvedKey = { focusedKey = it },
+        requester = contentFocus,
+    ) {
+        buildList {
             add("roam")
             add("favorites")
             if (playlistsLoaded) {
@@ -647,12 +653,6 @@ private fun BrowseHome(
                 add("all-playlists")
             }
             if (playback.hasMedia) add("now-playing")
-        }
-        focusedKey = focusedKey?.takeIf(availableKeys::contains) ?: availableKeys.firstOrNull()
-        yield()
-        if (focusedKey != null) {
-            runCatching { contentFocus.requestFocus() }
-            initialFocusRequested = true
         }
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 24.dp)) {
@@ -1074,7 +1074,7 @@ private fun BrowseMy(
     val artistsLoaded = artistState.snapshot.initialLoadCompleted
     val albumsLoaded = albumState.snapshot.initialLoadCompleted
     var focusedKey by rememberSaveable { mutableStateOf<String?>(null) }
-    var initialFocusRequested by remember { mutableStateOf(false) }
+    val focusRestore = rememberFocusRestoreRequester()
     val contentFocus = remember { FocusRequester() }
     val nowPlayingFocus = remember { FocusRequester() }
     val homeTabFocus = remember { FocusRequester() }
@@ -1096,13 +1096,18 @@ private fun BrowseMy(
             { page -> container.musicRepository.albums(page, FULL_CATALOG_PAGE_SIZE) },
         ) { it.guid.value }
     }
-    LaunchedEffect(artistsLoaded, albumsLoaded, playback.hasMedia, focusedKey) {
-        if (initialFocusRequested) return@LaunchedEffect
+    FocusRestoreEffect(
+        artistsLoaded, albumsLoaded, playback.hasMedia, focusedKey,
+        restore = focusRestore,
+        focusedKey = focusedKey,
+        onResolvedKey = { focusedKey = it },
+        requester = contentFocus,
+    ) {
         val allContentLoaded = artistsLoaded && albumsLoaded
         val restoringChrome = focusedKey == "settings" || focusedKey == "switch-account" ||
             playback.hasMedia && focusedKey == "now-playing"
-        if (!allContentLoaded && !restoringChrome) return@LaunchedEffect
-        val availableKeys = buildList {
+        if (!allContentLoaded && !restoringChrome) return@FocusRestoreEffect emptyList()
+        buildList {
             if (allContentLoaded) {
                 addAll(artists.take(8).map { "artist:${it.guid.value}" })
                 add("all-artists")
@@ -1113,12 +1118,6 @@ private fun BrowseMy(
             if (playback.hasMedia) add("now-playing")
             add("settings")
             add("switch-account")
-        }
-        focusedKey = focusedKey?.takeIf(availableKeys::contains) ?: availableKeys.firstOrNull()
-        yield()
-        if (focusedKey != null) {
-            runCatching { contentFocus.requestFocus() }
-            initialFocusRequested = true
         }
     }
     Column(
@@ -1856,16 +1855,17 @@ private fun <T> GridPage(
     item: @Composable (T, Modifier) -> Unit,
 ) {
     var focusedKey by rememberSaveable(title) { mutableStateOf<String?>(null) }
-    var initialFocusRequested by remember(title) { mutableStateOf(false) }
+    val focusRestore = rememberFocusRestoreRequester(title)
     val contentFocus = remember(title) { FocusRequester() }
     val gridState = rememberLazyGridState()
-    LaunchedEffect(entries, focusedKey) {
-        if (entries.isEmpty() || initialFocusRequested) return@LaunchedEffect
-        val keys = entries.map(key)
-        focusedKey = focusedKey?.takeIf(keys::contains) ?: keys.first()
-        yield()
-        runCatching { contentFocus.requestFocus() }
-        initialFocusRequested = true
+    FocusRestoreEffect(
+        entries, focusedKey,
+        restore = focusRestore,
+        focusedKey = focusedKey,
+        onResolvedKey = { focusedKey = it },
+        requester = contentFocus,
+    ) {
+        if (entries.isEmpty()) emptyList() else entries.map(key)
     }
     Column(Modifier.fillMaxSize().padding(64.dp, 44.dp)) {
         Text(title, fontSize = 40.sp, fontWeight = FontWeight.Bold)
@@ -1908,7 +1908,7 @@ private data class TrackDetailHeader(
     val onBack: () -> Unit,
 )
 
-private enum class CollectionArtworkFallback { Initial, Artist, Favorites, Collection }
+internal enum class CollectionArtworkFallback { Initial, Artist, Favorites, Collection }
 
 private sealed interface TrackCollectionPrimaryAction {
     data object PlayAll : TrackCollectionPrimaryAction
@@ -2007,24 +2007,18 @@ private fun ArtistAlbumGrid(
 ) {
     val albums = snapshot.entries
     var focusedKey by rememberSaveable(stateKey) { mutableStateOf<String?>(null) }
-    var initialFocusRequested by remember(stateKey) { mutableStateOf(false) }
+    val focusRestore = rememberFocusRestoreRequester(stateKey)
     val restoredFocus = remember(stateKey) { FocusRequester() }
     val gridState = rememberLazyGridState()
-    LaunchedEffect(snapshot.initialLoadCompleted, albums, initialFocusEnabled, focusedKey) {
-        if (!initialFocusEnabled || !snapshot.initialLoadCompleted || albums.isEmpty() || initialFocusRequested) return@LaunchedEffect
-        val availableKeys = albums.map { it.guid.value }
-        val targetKey = focusedKey?.takeIf(availableKeys::contains) ?: availableKeys.first()
-        if (focusedKey != targetKey) {
-            focusedKey = targetKey
-            return@LaunchedEffect
-        }
-        repeat(3) {
-            withFrameNanos { }
-            if (runCatching { restoredFocus.requestFocus() }.getOrDefault(false)) {
-                initialFocusRequested = true
-                return@LaunchedEffect
-            }
-        }
+    FocusRestoreEffect(
+        snapshot.initialLoadCompleted, albums, focusedKey,
+        restore = focusRestore,
+        enabled = initialFocusEnabled && snapshot.initialLoadCompleted,
+        focusedKey = focusedKey,
+        onResolvedKey = { focusedKey = it },
+        requester = restoredFocus,
+    ) {
+        albums.map { it.guid.value }
     }
     LazyVerticalGrid(
         columns = GridCells.Fixed(3),
@@ -2039,8 +2033,7 @@ private fun ArtistAlbumGrid(
                 Text("正在加载专辑", color = FnColors.Muted, fontSize = 16.sp, modifier = Modifier.padding(vertical = 20.dp))
             }
         }
-        items(albums, key = { it.guid.value }) { album ->
-            val index = albums.indexOf(album)
+        itemsIndexed(albums, key = { _, album -> album.guid.value }) { index, album ->
             DetailAlbumCard(
                 album = album,
                 modifier = Modifier
@@ -2185,7 +2178,7 @@ private fun TrackCollection(
     val expectedTotal = snapshot.expectedTotal
     val expectedSort = snapshot.expectedSort
     var focusedKey by rememberSaveable(stateKey) { mutableStateOf<String?>(null) }
-    var initialFocusRequested by remember(stateKey) { mutableStateOf(false) }
+    val focusRestore = rememberFocusRestoreRequester(stateKey)
     val restoredFocus = remember(stateKey) { FocusRequester() }
     val listState = rememberLazyListState()
     val actionScope = rememberCoroutineScope()
@@ -2286,14 +2279,14 @@ private fun TrackCollection(
     LaunchedEffect(stateKey, contentRevision) {
         if (loadedContentRevision != null && loadedContentRevision != contentRevision) {
             retained.snapshot = RetainedTrackCollectionSnapshot()
-            initialFocusRequested = false
+            focusRestore.reset()
         }
         loadedContentRevision = contentRevision
         if (!retained.snapshot.initialLoadCompleted) {
             load(1)
         }
     }
-    val playableTracks = tracks.filter(::isTrackPlayable)
+    val playableTracks = remember(tracks) { tracks.filter(::isTrackPlayable) }
     val primaryActionEnabled = when (primaryAction) {
         TrackCollectionPrimaryAction.PlayAll -> playableTracks.isNotEmpty()
         is TrackCollectionPrimaryAction.StartRoam -> true
@@ -2302,27 +2295,19 @@ private fun TrackCollection(
         TrackCollectionPrimaryAction.PlayAll -> "播放全部"
         is TrackCollectionPrimaryAction.StartRoam -> "随机漫游"
     }
-    LaunchedEffect(snapshot.initialLoadCompleted, tracks, focusedKey, initialFocusEnabled, showTrackList, primaryActionEnabled) {
-        if (!initialFocusEnabled || !snapshot.initialLoadCompleted || initialFocusRequested) return@LaunchedEffect
-        val availableKeys = buildList {
+    FocusRestoreEffect(
+        snapshot.initialLoadCompleted, tracks, focusedKey, initialFocusEnabled, showTrackList, primaryActionEnabled,
+        restore = focusRestore,
+        enabled = initialFocusEnabled && snapshot.initialLoadCompleted,
+        focusedKey = focusedKey,
+        onResolvedKey = { focusedKey = it },
+        requester = restoredFocus,
+    ) {
+        buildList {
             if (primaryActionEnabled) add("primary-action")
             detailHeader.tabs.filter { it.selected }.forEach { add(it.key) }
             if (showTrackList) addAll(playableTracks.map { it.guid.value })
             add("detail-back")
-        }
-        val targetKey = focusedKey?.takeIf(availableKeys::contains) ?: availableKeys.firstOrNull()
-        if (focusedKey != targetKey) {
-            focusedKey = targetKey
-            return@LaunchedEffect
-        }
-        if (targetKey != null) {
-            repeat(3) {
-                withFrameNanos { }
-                if (runCatching { restoredFocus.requestFocus() }.getOrDefault(false)) {
-                    initialFocusRequested = true
-                    return@LaunchedEffect
-                }
-            }
         }
     }
     DetailTrackCollection(
@@ -2529,61 +2514,6 @@ private fun DetailTrackCollection(
         } else {
             Box(Modifier.weight(1f).fillMaxWidth()) { alternateContent() }
         }
-    }
-}
-
-@Composable
-private fun CollectionArtwork(
-    container: AuthenticatedAppDependencies,
-    title: String,
-    coverId: String?,
-    fallback: CollectionArtworkFallback,
-    modifier: Modifier,
-    shape: Shape,
-) {
-    val resolvedShape = if (fallback == CollectionArtworkFallback.Artist) CircleShape else shape
-    if (coverId != null) {
-        RemoteArtwork(
-            container = container,
-            coverId = coverId,
-            variant = CoverVariant.Grid,
-            modifier = modifier,
-            shape = resolvedShape,
-            contentScale = ContentScale.Crop,
-            placeholderContent = {
-                CollectionArtworkFallbackContent(title, fallback, Modifier.fillMaxSize(), resolvedShape)
-            },
-        )
-    } else {
-        CollectionArtworkFallbackContent(title, fallback, modifier, resolvedShape)
-    }
-}
-
-@Composable
-private fun CollectionArtworkFallbackContent(
-    title: String,
-    fallback: CollectionArtworkFallback,
-    modifier: Modifier,
-    shape: Shape,
-) {
-    when (fallback) {
-        CollectionArtworkFallback.Artist -> ArtistAvatarPlaceholder(
-            title = title,
-            modifier = modifier,
-            fontSize = 58.sp,
-        )
-        CollectionArtworkFallback.Favorites -> Box(modifier.clip(shape)) {
-            HomeFeatureArtwork(HomeArtworkKind.Favorites, Modifier.fillMaxSize())
-        }
-        CollectionArtworkFallback.Collection -> Box(modifier.clip(shape)) {
-            HomeFeatureArtwork(HomeArtworkKind.Collection, Modifier.fillMaxSize())
-        }
-        CollectionArtworkFallback.Initial -> InitialArtworkPlaceholder(
-            text = title,
-            accent = FnColors.Coral,
-            modifier = modifier,
-            shape = shape,
-        )
     }
 }
 
@@ -2842,288 +2772,6 @@ private fun PlaylistTile(
 }
 
 @Composable
-private fun PlaylistTileArtwork(
-    title: String,
-    coverId: String?,
-    accent: Color,
-    modifier: Modifier = Modifier,
-    featureArtwork: HomeArtworkKind? = null,
-) {
-    val container = LocalAuthenticatedDependencies.current
-    val shape = RectangleShape
-    if (featureArtwork != null) {
-        HomeFeatureArtwork(featureArtwork, modifier)
-    } else if (coverId != null) {
-        RemoteArtwork(
-            container = container,
-            coverId = coverId,
-            variant = CoverVariant.Grid,
-            modifier = modifier,
-            shape = shape,
-            contentScale = ContentScale.Crop,
-            placeholderContent = {
-                InitialArtworkPlaceholder(title, accent, Modifier.fillMaxSize(), shape)
-            },
-        )
-    } else {
-        InitialArtworkPlaceholder(title, accent, modifier, shape)
-    }
-}
-
-private enum class HomeArtworkKind { Roam, Favorites, Collection, PlaylistGrid }
-
-@Composable
-private fun HomeFeatureArtwork(kind: HomeArtworkKind, modifier: Modifier) {
-    Canvas(modifier) {
-        val shortEdge = minOf(size.width, size.height)
-        fun point(x: Float, y: Float) = androidx.compose.ui.geometry.Offset(size.width * x, size.height * y)
-        fun drawVinyl(center: androidx.compose.ui.geometry.Offset, radius: Float, label: Color) {
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        Color(0xFF38393D),
-                        Color(0xFF0B0C0E),
-                        Color(0xFF27282C),
-                        Color(0xFF08090A),
-                    ),
-                    center = center,
-                    radius = radius,
-                ),
-                radius = radius,
-                center = center,
-            )
-            listOf(0.58f, 0.72f, 0.86f).forEach { scale ->
-                drawCircle(
-                    Color.White.copy(alpha = 0.08f),
-                    radius * scale,
-                    center,
-                    style = Stroke(shortEdge * 0.006f),
-                )
-            }
-            drawCircle(label, radius * 0.24f, center)
-            drawCircle(Color(0xFFF8F2E7), radius * 0.055f, center)
-        }
-
-        when (kind) {
-            HomeArtworkKind.Roam -> {
-                drawRect(
-                    brush = Brush.linearGradient(
-                        colors = listOf(Color(0xFFEAE6DF), Color(0xFFC5CDCB)),
-                        start = point(0.08f, 0f),
-                        end = point(0.94f, 1f),
-                    ),
-                )
-                drawVinyl(point(0.69f, 0.51f), shortEdge * 0.43f, FnColors.Warning)
-
-                val sleeveEdge = size.height * 0.84f
-                val sleeveTopLeft = point(0.12f, 0.08f)
-                val sleeveSize = androidx.compose.ui.geometry.Size(sleeveEdge, sleeveEdge)
-                val sleeveCorner = androidx.compose.ui.geometry.CornerRadius(shortEdge * 0.065f)
-                drawRoundRect(
-                    color = Color.Black.copy(alpha = 0.20f),
-                    topLeft = sleeveTopLeft + androidx.compose.ui.geometry.Offset(shortEdge * 0.035f, shortEdge * 0.045f),
-                    size = sleeveSize,
-                    cornerRadius = sleeveCorner,
-                )
-                drawRoundRect(
-                    brush = Brush.linearGradient(
-                        colors = listOf(
-                            Color(0xFFFF4938),
-                            FnColors.Coral,
-                            Color(0xFFEC477E),
-                            Color(0xFF7569D8),
-                        ),
-                        start = sleeveTopLeft,
-                        end = sleeveTopLeft + androidx.compose.ui.geometry.Offset(sleeveEdge, sleeveEdge),
-                    ),
-                    topLeft = sleeveTopLeft,
-                    size = sleeveSize,
-                    cornerRadius = sleeveCorner,
-                )
-                val orangeWave = Path().apply {
-                    moveTo(sleeveTopLeft.x, sleeveTopLeft.y + sleeveEdge * 0.68f)
-                    cubicTo(
-                        sleeveTopLeft.x + sleeveEdge * 0.18f, sleeveTopLeft.y + sleeveEdge * 0.48f,
-                        sleeveTopLeft.x + sleeveEdge * 0.32f, sleeveTopLeft.y + sleeveEdge * 0.56f,
-                        sleeveTopLeft.x + sleeveEdge * 0.48f, sleeveTopLeft.y + sleeveEdge * 0.42f,
-                    )
-                    cubicTo(
-                        sleeveTopLeft.x + sleeveEdge * 0.66f, sleeveTopLeft.y + sleeveEdge * 0.24f,
-                        sleeveTopLeft.x + sleeveEdge * 0.78f, sleeveTopLeft.y + sleeveEdge * 0.24f,
-                        sleeveTopLeft.x + sleeveEdge, sleeveTopLeft.y + sleeveEdge * 0.05f,
-                    )
-                    lineTo(sleeveTopLeft.x + sleeveEdge, sleeveTopLeft.y + sleeveEdge)
-                    lineTo(sleeveTopLeft.x, sleeveTopLeft.y + sleeveEdge)
-                    close()
-                }
-                drawPath(orangeWave, Color(0xFFFFA538).copy(alpha = 0.84f))
-                drawRoundRect(
-                    brush = Brush.linearGradient(
-                        colors = listOf(Color.White.copy(alpha = 0.18f), Color.Transparent),
-                        start = sleeveTopLeft,
-                        end = sleeveTopLeft + androidx.compose.ui.geometry.Offset(sleeveEdge * 0.72f, sleeveEdge),
-                    ),
-                    topLeft = sleeveTopLeft,
-                    size = sleeveSize,
-                    cornerRadius = sleeveCorner,
-                )
-            }
-
-            HomeArtworkKind.Favorites -> {
-                drawRect(
-                    brush = Brush.linearGradient(
-                        colors = listOf(
-                            Color(0xFFFF304D),
-                            Color(0xFFFF563F),
-                            Color(0xFFFF9D37),
-                            Color(0xFFFFD45A),
-                        ),
-                        start = point(0.08f, 0.06f),
-                        end = point(0.94f, 0.92f),
-                    ),
-                )
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(Color(0xFFD91442).copy(alpha = 0.72f), Color.Transparent),
-                        center = point(0.20f, 0.20f),
-                        radius = shortEdge * 0.78f,
-                    ),
-                    radius = shortEdge * 0.78f,
-                    center = point(0.20f, 0.20f),
-                )
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(Color(0xFFFFDA70).copy(alpha = 0.65f), Color.Transparent),
-                        center = point(0.89f, 0.89f),
-                        radius = shortEdge * 0.62f,
-                    ),
-                    radius = shortEdge * 0.62f,
-                    center = point(0.89f, 0.89f),
-                )
-                val heartSize = androidx.compose.ui.geometry.Size(shortEdge * 0.56f, shortEdge * 0.56f)
-                val heartOrigin = androidx.compose.ui.geometry.Offset(
-                    (size.width - heartSize.width) / 2f,
-                    (size.height - heartSize.height) / 2f - shortEdge * 0.015f,
-                )
-                withTransform({ translate(heartOrigin.x + shortEdge * 0.035f, heartOrigin.y + shortEdge * 0.055f) }) {
-                    drawPath(heartPath(heartSize), Color(0xFF9E1731).copy(alpha = 0.18f))
-                }
-                withTransform({ translate(heartOrigin.x, heartOrigin.y) }) {
-                    drawPath(heartPath(heartSize), Color(0xFFFFDDD8).copy(alpha = 0.78f))
-                }
-            }
-
-            HomeArtworkKind.Collection -> {
-                drawRect(
-                    brush = Brush.linearGradient(
-                        colors = listOf(Color(0xFF124A3A), Color(0xFF267A60), FnColors.Teal),
-                        start = point(0f, 0.10f),
-                        end = point(1f, 0.90f),
-                    ),
-                )
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(Color(0xFFB4ECD7).copy(alpha = 0.30f), Color.Transparent),
-                        center = point(0.88f, 0.12f),
-                        radius = shortEdge * 0.72f,
-                    ),
-                    radius = shortEdge * 0.72f,
-                    center = point(0.88f, 0.12f),
-                )
-                val discCenter = point(0.70f, 0.50f)
-                drawCircle(Color.Black.copy(alpha = 0.18f), shortEdge * 0.36f, discCenter + point(0.015f, 0.035f))
-                drawVinyl(discCenter, shortEdge * 0.35f, FnColors.Coral)
-
-                val coverEdge = size.height * 0.70f
-                val corner = androidx.compose.ui.geometry.CornerRadius(shortEdge * 0.045f)
-                drawRoundRect(
-                    color = Color.Black.copy(alpha = 0.18f),
-                    topLeft = point(0.16f, 0.20f),
-                    size = androidx.compose.ui.geometry.Size(coverEdge, coverEdge),
-                    cornerRadius = corner,
-                )
-                drawRoundRect(
-                    color = Color(0xFFE7C95D),
-                    topLeft = point(0.12f, 0.13f),
-                    size = androidx.compose.ui.geometry.Size(coverEdge, coverEdge),
-                    cornerRadius = corner,
-                )
-                drawRoundRect(
-                    brush = Brush.linearGradient(
-                        colors = listOf(Color(0xFFF4EFE5), Color(0xFFD5E0DB)),
-                        start = point(0.19f, 0.17f),
-                        end = point(0.53f, 0.84f),
-                    ),
-                    topLeft = point(0.19f, 0.17f),
-                    size = androidx.compose.ui.geometry.Size(coverEdge, coverEdge),
-                    cornerRadius = corner,
-                )
-                drawRoundRect(
-                    color = FnColors.Coral,
-                    topLeft = point(0.24f, 0.24f),
-                    size = androidx.compose.ui.geometry.Size(coverEdge * 0.23f, coverEdge * 0.62f),
-                    cornerRadius = corner,
-                )
-                drawRoundRect(
-                    color = Color(0xFF202528),
-                    topLeft = point(0.35f, 0.24f),
-                    size = androidx.compose.ui.geometry.Size(coverEdge * 0.14f, coverEdge * 0.62f),
-                    cornerRadius = corner,
-                )
-                drawRoundRect(
-                    color = FnColors.Teal,
-                    topLeft = point(0.43f, 0.24f),
-                    size = androidx.compose.ui.geometry.Size(coverEdge * 0.09f, coverEdge * 0.62f),
-                    cornerRadius = corner,
-                )
-            }
-
-            HomeArtworkKind.PlaylistGrid -> {
-                drawRect(Color(0xFF171C1F))
-                val borderInset = shortEdge * 0.012f
-                drawRoundRect(
-                    color = Color.White.copy(alpha = 0.13f),
-                    topLeft = androidx.compose.ui.geometry.Offset(borderInset, borderInset),
-                    size = androidx.compose.ui.geometry.Size(
-                        size.width - borderInset * 2f,
-                        size.height - borderInset * 2f,
-                    ),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(shortEdge * 0.07f),
-                    style = Stroke(
-                        width = 1.dp.toPx(),
-                        pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
-                            floatArrayOf(4.dp.toPx(), 4.dp.toPx()),
-                        ),
-                    ),
-                )
-                val cellSize = shortEdge * 0.15f
-                val gap = shortEdge * 0.055f
-                val gridWidth = cellSize * 2f + gap
-                val gridHeight = cellSize * 2f + gap
-                val gridOrigin = androidx.compose.ui.geometry.Offset(
-                    (size.width - gridWidth) / 2f,
-                    (size.height - gridHeight) / 2f,
-                )
-                repeat(2) { row ->
-                    repeat(2) { column ->
-                        drawRoundRect(
-                            color = Color(0xFF858B8E),
-                            topLeft = androidx.compose.ui.geometry.Offset(
-                                gridOrigin.x + column * (cellSize + gap),
-                                gridOrigin.y + row * (cellSize + gap),
-                            ),
-                            size = androidx.compose.ui.geometry.Size(cellSize, cellSize),
-                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(shortEdge * 0.035f),
-                            style = Stroke(width = 2.dp.toPx()),
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun ArtistLockup(
     title: String,
     subtitle: String,
@@ -3167,25 +2815,6 @@ private fun ArtistLockup(
             Spacer(Modifier.width(10.dp))
             LockupLabels(title, subtitle, Modifier.weight(1f))
         }
-    }
-}
-
-@Composable
-private fun ArtistAvatarPlaceholder(
-    title: String,
-    modifier: Modifier = Modifier,
-    fontSize: TextUnit = 23.sp,
-) {
-    Box(
-        modifier.background(Color(0xFF2D4A46), CircleShape),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            title.trim().take(1).ifBlank { "音" }.uppercase(),
-            color = FnColors.Teal,
-            fontSize = fontSize,
-            fontWeight = FontWeight.SemiBold,
-        )
     }
 }
 
@@ -3405,62 +3034,6 @@ private fun CatalogRetryButton(
             Text("重新加载列表", color = FnColors.Muted, fontSize = 9.sp)
         }
     }
-}
-
-@Composable
-private fun RemoteArtwork(
-    container: AuthenticatedAppDependencies,
-    coverId: String,
-    variant: CoverVariant,
-    modifier: Modifier = Modifier,
-    fallbackVariant: CoverVariant? = null,
-    shape: Shape = RoundedCornerShape(8.dp),
-    contentScale: ContentScale = ContentScale.Fit,
-    placeholderContent: (@Composable () -> Unit)? = null,
-) {
-    val bitmap = rememberRemoteArtworkBitmap(container, coverId, variant, fallbackVariant)
-    if (bitmap != null) {
-        Image(bitmap.asImageBitmap(), null, modifier.clip(shape), contentScale = contentScale)
-    } else {
-        Box(modifier.background(FnColors.Surface, shape), contentAlignment = Alignment.Center) {
-            if (placeholderContent != null) {
-                placeholderContent()
-            } else {
-                InitialArtworkPlaceholder(
-                    text = "",
-                    accent = FnColors.Teal,
-                    modifier = Modifier.fillMaxSize(),
-                    shape = shape,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun rememberRemoteArtworkBitmap(
-    container: AuthenticatedAppDependencies,
-    coverId: String?,
-    variant: CoverVariant,
-    fallbackVariant: CoverVariant? = null,
-): Bitmap? {
-    val initialBitmap = remember(container, coverId, variant, fallbackVariant) {
-        coverId?.let { id ->
-            container.artworkBitmapCache.peek(id, variant)
-                ?: fallbackVariant?.let { container.artworkBitmapCache.peek(id, it) }
-        }
-    }
-    val bitmap by produceState(initialBitmap, container, coverId, variant, fallbackVariant) {
-        value = coverId?.let { id ->
-            container.artworkBitmapCache.getProgressively(
-                coverId = id,
-                variant = variant,
-                fallbackVariant = fallbackVariant,
-                onIntermediate = { value = it },
-            )
-        }
-    }
-    return if (coverId == null) null else bitmap
 }
 
 @Composable

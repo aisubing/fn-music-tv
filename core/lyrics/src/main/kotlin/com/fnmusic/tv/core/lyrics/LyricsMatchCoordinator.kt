@@ -91,13 +91,13 @@ class LyricsMatchCoordinator(
 
         var failure: FailureKind? = null
         val matches = mutableListOf<ProviderMatch>()
-        candidates.forEach { scored ->
+        for (scored in candidates) {
             try {
                 val lyrics = withTimeoutOrNull(sourceTimeoutMs) { source.fetch(scored.candidate) }
                     ?: throw LyricsTransportException("${source.id} lyrics timed out")
                 if (!lyrics.hasUsableLines()) {
                     failure = FailureKind.InvalidResponse
-                    return@forEach
+                    continue
                 }
                 val rawContent = LyricsContentQualityEvaluator.evaluate(lyrics)
                 val durationDeltaMs = knownDurationDelta(request.durationMs, scored.candidate.durationMs)
@@ -105,13 +105,19 @@ class LyricsMatchCoordinator(
                     durationDeltaMs <= policy.maximumWordTimingDeltaMs &&
                     rawContent.wordTimedCoverage > 0.0
                 val eligibleLyrics = if (wordEligible) lyrics else lyrics.withoutWordTiming()
-                matches += ProviderMatch(
+                val match = ProviderMatch(
                     scored = scored,
                     lyrics = eligibleLyrics,
                     content = LyricsContentQualityEvaluator.evaluate(eligibleLyrics),
                     durationDeltaMs = durationDeltaMs,
                     wordEligible = wordEligible,
                 )
+                matches += match
+                // No later candidate from this source can materially beat a word-timed match
+                // with near-full translation coverage; skip the remaining serial fetches.
+                if (wordEligible && match.content.translationCoverage >= EARLY_STOP_TRANSLATION_COVERAGE) {
+                    break
+                }
             } catch (cause: CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
@@ -194,5 +200,6 @@ class LyricsMatchCoordinator(
 
     private companion object {
         const val MAX_FETCH_ATTEMPTS_PER_SOURCE = 3
+        const val EARLY_STOP_TRANSLATION_COVERAGE = 0.95
     }
 }

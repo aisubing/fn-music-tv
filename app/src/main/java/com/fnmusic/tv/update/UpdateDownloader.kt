@@ -21,6 +21,8 @@ internal interface UpdateApkDownloader {
     fun cleanAll()
 }
 
+private const val PROGRESS_CALLBACK_INTERVAL_MS = 100L
+
 internal class UpdateDownloader(
     context: Context,
     private val client: OkHttpClient = OkHttpClient.Builder()
@@ -62,6 +64,7 @@ internal class UpdateDownloader(
                         partial.outputStream().buffered().use { output ->
                             val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                             var total = 0L
+                            var lastProgressAt = 0L
                             while (true) {
                                 coroutineContext.ensureActive()
                                 val count = input.read(buffer)
@@ -70,7 +73,13 @@ internal class UpdateDownloader(
                                 if (total > manifest.apkSize) throw UpdateFailure("更新文件大于预期")
                                 digest.update(buffer, 0, count)
                                 output.write(buffer, 0, count)
-                                onProgress(total)
+                                // Per-chunk callbacks re-compose the root UI hundreds of times a second;
+                                // throttle to ~10 Hz while keeping the final 100% callback.
+                                val now = TimeUnit.NANOSECONDS.toMillis(System.nanoTime())
+                                if (total == manifest.apkSize || now - lastProgressAt >= PROGRESS_CALLBACK_INTERVAL_MS) {
+                                    onProgress(total)
+                                    lastProgressAt = now
+                                }
                             }
                             if (total != manifest.apkSize) throw UpdateFailure("更新文件不完整")
                         }

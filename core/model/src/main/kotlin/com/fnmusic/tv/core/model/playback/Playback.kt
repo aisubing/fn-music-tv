@@ -1,14 +1,5 @@
 package com.fnmusic.tv.core.model.playback
 
-import com.fnmusic.tv.core.model.Track
-
-sealed interface PlaybackSource {
-    data class Direct(val track: Track) : PlaybackSource
-    data class Hls(val track: Track, val reason: HlsReason) : PlaybackSource
-}
-
-enum class HlsReason { CueTrack, DecoderFallback }
-
 const val MAX_ACTIVE_QUEUE_ITEMS = 250
 const val DEFAULT_QUEUE_PAGE_SIZE = 50
 
@@ -69,20 +60,6 @@ sealed interface QueueSource {
     data class LibraryAllTracks(override val sort: String) : QueueSource
     data class Favorites(override val sort: String) : QueueSource
 }
-
-data class QueueCursor(
-    val source: QueueSource,
-    val trackGuids: List<String>,
-    val currentIndex: Int,
-    val absoluteIndex: Int,
-    val knownTotal: Int?,
-    val loadedPage: Int,
-    val pageSize: Int = 50,
-    val loadingNextPage: Boolean = false,
-    val endReached: Boolean = false,
-    val failureCount: Int = 0,
-    val invalidated: Boolean = false,
-)
 
 data class BoundedQueueWindow<T>(val items: List<T>, val selectedIndex: Int, val startIndex: Int)
 
@@ -440,43 +417,5 @@ private fun legacyQueueSegments(
         )
     }.also {
         require(offset == guids.size) { "Queue items exceed the declared page range" }
-    }
-}
-
-sealed interface QueueAction {
-    data class MoveTo(val index: Int) : QueueAction
-    data object Next : QueueAction
-    data object Previous : QueueAction
-    data object PageLoadStarted : QueueAction
-    data class PageLoaded(val page: Int, val guids: List<String>, val total: Int?) : QueueAction
-    data object PageLoadFailed : QueueAction
-}
-
-object QueueReducer {
-    fun reduce(state: QueueCursor, action: QueueAction): QueueCursor = when (action) {
-        is QueueAction.MoveTo -> state.copy(currentIndex = action.index.coerceIn(state.trackGuids.indices))
-        QueueAction.Next -> state.copy(currentIndex = (state.currentIndex + 1).coerceAtMost(state.trackGuids.lastIndex))
-        QueueAction.Previous -> state.copy(currentIndex = (state.currentIndex - 1).coerceAtLeast(0))
-        QueueAction.PageLoadStarted -> if (state.loadingNextPage || state.endReached) state else state.copy(loadingNextPage = true)
-        is QueueAction.PageLoaded -> appendPage(state, action)
-        QueueAction.PageLoadFailed -> state.copy(loadingNextPage = false, failureCount = state.failureCount + 1)
-    }
-
-    private fun appendPage(state: QueueCursor, action: QueueAction.PageLoaded): QueueCursor {
-        if (!state.loadingNextPage || action.page != state.loadedPage + 1) return state
-        val known = state.trackGuids.toHashSet()
-        val drifted = (state.knownTotal != null && action.total != null && state.knownTotal != action.total) ||
-            action.guids.any { it in known }
-        if (drifted) return state.copy(loadingNextPage = false, endReached = true, invalidated = true)
-        val unique = action.guids.filter(known::add)
-        val tracks = state.trackGuids + unique
-        return state.copy(
-            trackGuids = tracks,
-            knownTotal = action.total,
-            loadedPage = action.page,
-            loadingNextPage = false,
-            endReached = tracks.size >= (action.total ?: Int.MAX_VALUE) || action.guids.isEmpty(),
-            failureCount = 0,
-        )
     }
 }

@@ -3,6 +3,7 @@ package com.fnmusic.tv.core.data.repository
 import com.fnmusic.tv.core.model.CoverVariant
 import java.io.IOException
 import java.nio.file.Files
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -11,6 +12,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -55,7 +57,8 @@ class ArtworkCacheTest {
         assertArrayEquals(expected, first.get("server:user", "cover", CoverVariant.Player) {
             error("memory hit expected")
         })
-        assertEquals(2_000L, file.lastModified())
+        // Memory hits refresh the disk mtime through a coalesced background touch.
+        awaitFileMtime(file, 2_000L)
 
         val second = cache(clock = { 3_000L })
         assertArrayEquals(expected, second.get("server:user", "cover", CoverVariant.Player) {
@@ -287,5 +290,13 @@ class ArtworkCacheTest {
             yield()
         }
         error("Timed out waiting for $expected artwork waiters")
+    }
+
+    private suspend fun awaitFileMtime(file: java.io.File, expected: Long) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (file.lastModified() != expected && System.nanoTime() < deadline) {
+            delay(10)
+        }
+        assertEquals(expected, file.lastModified())
     }
 }

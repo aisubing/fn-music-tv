@@ -42,7 +42,7 @@ class SettingsScreenTest {
             "128 MB",
             "256 MB",
             "关于",
-            "回声台",
+            "小牛音乐",
             "Tag mig hånden",
             "github.com/QiaoKes/fn-music-tv",
         ).forEach { label ->

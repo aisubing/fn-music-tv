@@ -5,9 +5,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 concurrency:
   group: android-package-${{ github.ref }}
   cancel-in-progress: false
@@ -18,10 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     timeout-minutes: 30
+    permissions:
+      contents: write
 
     steps:
       - name: Check out source
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Read package version
         id: version
@@ -35,8 +36,13 @@ jobs:
           [[ "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           tag="v$VERSION_NAME"
           publish=true
-          if gh release view "$tag" >/dev/null 2>&1; then
+          # Only a clean 404 means the release is absent; a network or auth error must fail
+          # loudly here instead of resurfacing later as a confusing already_exists error.
+          if lookup_output=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" 2>&1); then
             publish=false
+          elif [[ "$lookup_output" != *"HTTP 404"* ]]; then
+            echo "::error::Unable to determine whether release $tag exists: $lookup_output"
+            exit 1
           fi
           echo "code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
           echo "name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
@@ -93,21 +99,11 @@ jobs:
 
       - name: Build signed universal APK
         env:
-          FN_CONNECT_API_KEY: ${{ secrets.FN_CONNECT_API_KEY }}
-          FN_CONNECT_AUTHX_PREFIX: ${{ secrets.FN_CONNECT_AUTHX_PREFIX }}
           FN_MUSIC_RELEASE_PASSWORD: ${{ secrets.FN_MUSIC_RELEASE_PASSWORD }}
           FN_MUSIC_UPDATE_MANIFEST_URL: ${{ vars.FN_MUSIC_UPDATE_MANIFEST_URL }}
         run: |
           set -euo pipefail
-          test -n "$FN_CONNECT_API_KEY"
-          test -n "$FN_CONNECT_AUTHX_PREFIX"
           test -n "$FN_MUSIC_UPDATE_MANIFEST_URL"
-          echo "::add-mask::$FN_CONNECT_API_KEY"
-          echo "::add-mask::$FN_CONNECT_AUTHX_PREFIX"
-          if git grep -F -q -- "$FN_CONNECT_API_KEY" || git grep -F -q -- "$FN_CONNECT_AUTHX_PREFIX"; then
-            echo "::error::Tracked source contains plaintext release connection configuration."
-            exit 1
-          fi
           ./gradlew --no-daemon --stacktrace \
             --no-build-cache \
             -PfnMusicReleaseStoreFile="${{ steps.signing.outputs.keystore }}" \
@@ -118,29 +114,17 @@ jobs:
         id: artifact
         shell: bash
         env:
-          FN_CONNECT_API_KEY: ${{ secrets.FN_CONNECT_API_KEY }}
-          FN_CONNECT_AUTHX_PREFIX: ${{ secrets.FN_CONNECT_AUTHX_PREFIX }}
           VERSION_CODE: ${{ steps.version.outputs.code }}
           VERSION_NAME: ${{ steps.version.outputs.name }}
         run: |
           set -euo pipefail
-          echo "::add-mask::$FN_CONNECT_API_KEY"
-          echo "::add-mask::$FN_CONNECT_AUTHX_PREFIX"
           source_apk="app/build/outputs/apk/sideload/release/fn-music-tv-$VERSION_NAME-sideload-release.apk"
           test -f "$source_apk"
-
-          scan_dir="$(mktemp -d "$RUNNER_TEMP/apk-plaintext-scan.XXXXXX")"
-          unzip -q "$source_apk" -d "$scan_dir"
-          if grep -R -a -F -q -- "$FN_CONNECT_API_KEY" "$scan_dir" || \
-             grep -R -a -F -q -- "$FN_CONNECT_AUTHX_PREFIX" "$scan_dir"; then
-            echo "::error::Release package contains plaintext connection configuration."
-            exit 1
-          fi
 
           aapt="$ANDROID_HOME/build-tools/36.0.0/aapt"
           apksigner="$ANDROID_HOME/build-tools/36.0.0/apksigner"
           badging="$("$aapt" dump badging "$source_apk")"
-          grep -F "package: name='com.fnmusic.tv' versionCode='$VERSION_CODE' versionName='$VERSION_NAME'" <<< "$badging"
+          grep -F "package: name='com.fnmusics.tv' versionCode='$VERSION_CODE' versionName='$VERSION_NAME'" <<< "$badging"
           grep -F "sdkVersion:'23'" <<< "$badging"
           grep -F "targetSdkVersion:'36'" <<< "$badging"
           grep -F "native-code: 'arm64-v8a' 'armeabi-v7a' 'x86' 'x86_64'" <<< "$badging"
@@ -154,8 +138,10 @@ jobs:
 
           mkdir -p dist
           release_apk="dist/fn-music-tv-$VERSION_NAME-universal.apk"
+          release_checksum="$release_apk.sha256"
           cp "$source_apk" "$release_apk"
-          sha256sum "$release_apk" > "$release_apk.sha256"
+          # Hash the basename only, so `sha256sum -c` succeeds inside the download directory.
+          ( cd dist && sha256sum "$(basename "$release_apk")" > "$(basename "$release_checksum")" )
           metadata="dist/release-metadata.json"
           ./tool/release-metadata/generate-release-metadata.sh \
             "$release_apk" \

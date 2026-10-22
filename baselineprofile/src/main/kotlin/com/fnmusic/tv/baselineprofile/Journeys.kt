@@ -4,7 +4,7 @@ import androidx.benchmark.macro.MacrobenchmarkScope
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.Until
 
-internal const val PACKAGE_NAME = "com.fnmusic.tv"
+internal const val PACKAGE_NAME = "com.fnmusics.tv"
 private const val WAIT_MS = 5_000L
 
 internal fun MacrobenchmarkScope.exerciseLoginOrHome() {

@@ -193,7 +193,7 @@ class MusicRepository internal constructor(
         onlineLyricsMatcher = defaultOnlineLyricsMatcher(),
     )
 
-    private val responses = SerializedResponseCache(metadataCapacityBytes, repositoryScope)
+    private val responses = DecodedResponseCache(metadataCapacityBytes, repositoryScope)
     private val onlineLyricsResolver = OnlineLyricsResolver(
         localStore = localStore,
         responses = responses,
@@ -487,9 +487,10 @@ class MusicRepository internal constructor(
     private suspend fun lyricResponse(trackGuid: String): LyricListDto {
         val namespace = session.cacheNamespace()
         val key = ResponseCacheKey(namespace, "lyric", trackGuid)
-        var decodedResponse: LyricListDto? = null
-        val payload = responses.getOrFetch(
+        return responses.getOrFetch(
             key = key,
+            encode = { ApiDecoder.json.encodeToString(it) },
+            maxAgeMs = RESPONSE_TTL_MS,
             persist = { encoded ->
                 bestEffort {
                     localStore.saveLyric(CachedLyricEntity(namespace, trackGuid, encoded, now()))
@@ -498,18 +499,14 @@ class MusicRepository internal constructor(
         ) {
             try {
                 session.authenticated { it.lyrics(trackGuid) }
-                    .also { decodedResponse = it }
-                    .let(ApiDecoder.json::encodeToString)
             } catch (cause: CancellationException) {
                 throw cause
             } catch (cause: AppException) {
                 if (cause.error != AppError.NetworkUnavailable) throw cause
                 val cached = fallback { localStore.lyric(namespace, trackGuid) } ?: throw cause
-                decodedResponse = validatePayload<LyricListDto>(cached.payload) ?: throw cause
-                cached.payload
+                validatePayload<LyricListDto>(cached.payload) ?: throw cause
             }
         }
-        return decodedResponse ?: ApiDecoder.json.decodeFromString(payload)
     }
 
     private suspend inline fun <reified Dto, Domain> cachedPage(
@@ -522,20 +519,23 @@ class MusicRepository internal constructor(
         val namespace = session.cacheNamespace()
         val key = ResponseCacheKey(namespace, "page", sourceKey, page)
         var decodedResponse: SortedPageListDto<Dto>? = null
-        val payload = responses.getOrFetch(
+        val response = responses.getOrFetch(
             key = key,
+            encode = { value: SortedPageListDto<Dto> -> ApiDecoder.json.encodeToString(value) },
+            maxAgeMs = RESPONSE_TTL_MS,
             persist = { encoded ->
                 bestEffort {
-                    val response = decodedResponse
-                        ?: ApiDecoder.json.decodeFromString<SortedPageListDto<Dto>>(encoded)
+                    val value = decodedResponse
+                        ?: validatePayload<SortedPageListDto<Dto>>(encoded)
+                        ?: return@bestEffort
                     localStore.savePage(
                         CachedPageEntity(
                             namespace = namespace,
                             sourceKey = sourceKey,
                             page = page,
                             payload = encoded,
-                            total = response.total,
-                            sort = response.sort,
+                            total = value.total,
+                            sort = value.sort,
                             accessedAt = now(),
                         ),
                     )
@@ -543,30 +543,29 @@ class MusicRepository internal constructor(
             },
         ) {
             try {
-                fetch().also { decodedResponse = it }.let(ApiDecoder.json::encodeToString)
+                fetch().also { decodedResponse = it }
             } catch (cause: CancellationException) {
                 throw cause
             } catch (cause: AppException) {
                 if (cause.error != AppError.NetworkUnavailable) throw cause
                 val cached = fallback { localStore.page(namespace, sourceKey, page) } ?: throw cause
-                decodedResponse = validatePayload<SortedPageListDto<Dto>>(cached.payload) ?: throw cause
-                cached.payload
+                validatePayload<SortedPageListDto<Dto>>(cached.payload) ?: throw cause
             }
         }
-        return (decodedResponse ?: ApiDecoder.json.decodeFromString<SortedPageListDto<Dto>>(payload))
-            .toDomainPage(page, pageSize, transform)
+        return response.toDomainPage(page, pageSize, transform)
     }
 
-    private suspend inline fun <reified Dto, Domain> cachedIndex(
+    private suspend inline fun <reified Dto : Any, Domain> cachedIndex(
         key: String,
         crossinline fetch: suspend () -> Dto,
         transform: (Dto) -> Domain,
     ): Domain {
         val namespace = session.cacheNamespace()
         val cacheKey = ResponseCacheKey(namespace, "index", key)
-        var decodedResponse: Dto? = null
-        val payload = responses.getOrFetch(
+        val response = responses.getOrFetch(
             key = cacheKey,
+            encode = { value: Dto -> ApiDecoder.json.encodeToString(value) },
+            maxAgeMs = RESPONSE_TTL_MS,
             persist = { encoded ->
                 bestEffort {
                     localStore.saveIndex(CachedIndexEntity(namespace, key, encoded, now()))
@@ -574,17 +573,16 @@ class MusicRepository internal constructor(
             },
         ) {
             try {
-                fetch().also { decodedResponse = it }.let(ApiDecoder.json::encodeToString)
+                fetch()
             } catch (cause: CancellationException) {
                 throw cause
             } catch (cause: AppException) {
                 if (cause.error != AppError.NetworkUnavailable) throw cause
                 val cached = fallback { localStore.index(namespace, key) } ?: throw cause
-                decodedResponse = validatePayload<Dto>(cached.payload) ?: throw cause
-                cached.payload
+                validatePayload<Dto>(cached.payload) ?: throw cause
             }
         }
-        return transform(decodedResponse ?: ApiDecoder.json.decodeFromString(payload))
+        return transform(response)
     }
 
     private suspend fun <T> currentResource(block: suspend () -> T?): CurrentResourceResult<T> = try {
@@ -626,6 +624,10 @@ class MusicRepository internal constructor(
 
     private companion object {
         const val METADATA_CAPACITY_BYTES = 8 * 1024 * 1024
+
+        // Memory-tier freshness window: within it a re-visit is served without hitting the NAS,
+        // after it the next visit refetches. Room remains the offline fallback either way.
+        const val RESPONSE_TTL_MS = 10 * 60 * 1000L
         const val ARTWORK_MEMORY_CAPACITY_BYTES = 24 * 1024 * 1024
         const val PAGE_SIZE = 50
         const val FAVORITE_PAGE_SIZE = 50

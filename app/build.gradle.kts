@@ -57,7 +57,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.fnmusic.tv"
+        applicationId = "com.fnmusics.tv"
         minSdk = 23
         targetSdk = 36
         versionCode = managedVersionCode

@@ -80,16 +80,24 @@ class SessionRepository internal constructor(
     private val preferences = context.getSharedPreferences("session", Context.MODE_PRIVATE)
     private val _state = MutableStateFlow<SessionState>(SessionState.Loading)
     val state: StateFlow<SessionState> = _state.asStateFlow()
-    private var memoryToken: String? = null
-    private var memoryAccessCode: String? = null
-    private var memoryProfileId: String? = null
-    private var rememberedCredentialsLoaded = false
-    private var secureSessionUnreadable = false
+
+    // Session fields are written on the main thread (login/logout) and read from repository IO
+    // coroutines (authenticated reads, restore retries); volatile keeps those readers current.
+    // Restore and a manual login can run concurrently, but each publishes through completeSignIn.
+    @Volatile private var memoryToken: String? = null
+    @Volatile private var memoryAccessCode: String? = null
+    @Volatile private var memoryProfileId: String? = null
+    @Volatile private var rememberedCredentialsLoaded = false
+    @Volatile private var secureSessionUnreadable = false
     @Volatile private var securePayload = SecureSessionPayload()
-    private var connectionAccess = ConnectionAccess()
-    private var api: TrimMusicApi? = null
+    @Volatile private var connectionAccess = ConnectionAccess()
+    @Volatile private var api: TrimMusicApi? = null
     private val authVerification = Mutex()
     private val credentialsMutex = Mutex()
+
+    // One pooled client for every connect/restore attempt so connections, threads, and the
+    // keep-alive cache are shared instead of rebuilt per server probe.
+    private val sharedClient: OkHttpClient by lazy { clientFactory() }
 
     val savedServer: String get() = preferences.getString(SERVER, "").orEmpty()
     val recentServers: List<String>
@@ -136,7 +144,12 @@ class SessionRepository internal constructor(
                     attempt = attempt,
                     error = error,
                 )
-                delay(retryDelaysMillis[(attempt - 1).coerceAtMost(retryDelaysMillis.lastIndex)])
+                val delayMillis = if (attempt - 1 < retryDelaysMillis.size) {
+                    retryDelaysMillis[attempt - 1]
+                } else {
+                    RESTORE_RETRY_CAP_MILLIS
+                }
+                delay(delayMillis)
                 attempt += 1
             }
         }
@@ -286,6 +299,11 @@ class SessionRepository internal constructor(
         return try {
             block(current)
         } catch (cause: AppException) {
+            if (cause.error == AppError.Unauthenticated && verifyCurrentSession(current)) {
+                // The token just verified as valid, so the 401 came from a transient path
+                // (for example the relay); one replay avoids a false sign-out upstream.
+                return block(current)
+            }
             when (cause.error) {
                 AppError.AccountDisabled -> invalidateSession(AppError.AccountDisabled)
                 AppError.Unauthenticated -> verifyCurrentSession(current)
@@ -402,7 +420,7 @@ class SessionRepository internal constructor(
         restoredRelayMode: Boolean? = null,
     ): ConnectedServer {
         try {
-            val client = clientFactory()
+            val client = sharedClient
             val resolver = ConnectionResolver(client)
             val target = if (restoredRelayMode == null) {
                 resolver.resolve(input, useHttps)
@@ -537,6 +555,10 @@ class SessionRepository internal constructor(
         const val RECENT_SERVER_PREFIX = "recent_server_"
         const val MAX_LOGIN_HISTORY = 5
         val DEFAULT_RETRY_DELAYS = longArrayOf(1_000, 2_000, 4_000, 8_000, 15_000, 30_000)
+
+        // Once the fast backoff ladder is exhausted, the NAS is likely down for a while; keep
+        // auto-recovery alive but stop reconnecting every 30 seconds around the clock.
+        const val RESTORE_RETRY_CAP_MILLIS = 120_000L
     }
 
     private val savedRelayMode: Boolean get() = preferences.getBoolean(RELAY_MODE, false)

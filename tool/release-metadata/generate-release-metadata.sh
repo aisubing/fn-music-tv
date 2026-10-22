@@ -37,7 +37,7 @@ built_at=${BUILD_TIMESTAMP:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 
 mkdir -p "$(dirname "$output")"
 jq -n \
-  --arg packageName "com.fnmusic.tv" \
+  --arg packageName "com.fnmusics.tv" \
   --arg versionName "$VERSION_NAME" \
   --argjson versionCode "$VERSION_CODE" \
   --arg fileName "$file_name" \
@@ -63,7 +63,7 @@ jq -n \
 
 jq -e '
   .schemaVersion == 1 and
-  .packageName == "com.fnmusic.tv" and
+  .packageName == "com.fnmusics.tv" and
   (.versionName | test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) and
   (.versionCode | type == "number" and . > 0) and
   (.apk.fileName | type == "string" and endswith("-universal.apk")) and

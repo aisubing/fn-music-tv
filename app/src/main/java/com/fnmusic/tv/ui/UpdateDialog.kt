@@ -85,7 +85,7 @@ internal fun UpdateDialogHost(state: UpdateUiState, controller: UpdateController
         )
         is UpdateUiState.AwaitingInstallPermission -> UpdateStatusDialog(
             title = "允许安装更新",
-            message = "需要先允许回声台安装来自本应用的更新。开启后返回这里，系统仍会再次请你确认安装。",
+            message = "需要先允许小牛音乐安装来自本应用的更新。开启后返回这里，系统仍会再次请你确认安装。",
             primaryLabel = "去开启",
             onPrimary = controller::openInstallPermissionSettings,
             secondaryLabel = "取消",

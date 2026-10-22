@@ -13,6 +13,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 internal class UpdateCoordinator(
     private val application: Application,
@@ -53,8 +55,13 @@ internal class UpdateCoordinator(
     private var systemHandoff: SystemHandoff? = null
 
     init {
-        preferences.cleanBelow(BuildConfig.VERSION_CODE.toLong())
-        downloader.cleanAll()
+        // Legacy-preference cleanup and stale-download sweeps touch disk; keep them off the
+        // main thread that constructs the coordinator. Downloads use version-specific names,
+        // so ordering against a concurrent new download does not matter.
+        scope.launch {
+            preferences.cleanBelow(BuildConfig.VERSION_CODE.toLong())
+            withContext(Dispatchers.IO) { downloader.cleanAll() }
+        }
     }
 
     fun onForeground() {

@@ -99,15 +99,24 @@ internal class AuthenticatedAppCoordinator(
     }
 
     override suspend fun switchAccount() {
-        switchAuthenticatedAccount(
-            clearPlaybackSession = playbackController::clearSessionDurably,
-            clearArtwork = {
-                artworkBitmapCache.clear()
-                musicRepository.clearArtwork()
-            },
-            clearLocalNamespace = { musicRepository.clearLocalNamespace(includeEssential = false) },
-            logout = sessionRepository::logout,
-        )
+        // Runs on the application scope: the caller's composition scope may be torn down the
+        // moment the account flips, and an interrupted switch would leave caches cleared while
+        // the session is still signed in.
+        applicationScope.launch {
+            // The application scope has no exception handler; a failed logout step must not
+            // crash the process. logout() still publishes signed-out state from its finally.
+            runCatching {
+                switchAuthenticatedAccount(
+                    clearPlaybackSession = playbackController::clearSessionDurably,
+                    clearArtwork = {
+                        artworkBitmapCache.clear()
+                        musicRepository.clearArtwork()
+                    },
+                    clearLocalNamespace = { musicRepository.clearLocalNamespace(includeEssential = false) },
+                    logout = sessionRepository::logout,
+                )
+            }
+        }
     }
 
     override suspend fun clearAllEvictableCaches() {

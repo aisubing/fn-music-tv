@@ -9,6 +9,7 @@ import java.util.zip.InflaterInputStream
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -65,12 +66,17 @@ class QqMusicLyricsSource(
         }
     }
 
-    override suspend fun fetch(candidate: LyricsCandidate): SyncedLyrics = try {
-        fetchNativeQrc(candidate)
-    } catch (cause: CancellationException) {
-        throw cause
-    } catch (_: Exception) {
-        fetchLrc(candidate)
+    override suspend fun fetch(candidate: LyricsCandidate): SyncedLyrics {
+        // Cap the QRC attempt so its fallback LRC fetch always keeps a slice of the
+        // coordinator's per-candidate timeout instead of being starved at the deadline.
+        val qrc = try {
+            withTimeoutOrNull(QRC_ATTEMPT_BUDGET_MS) { fetchNativeQrc(candidate) }
+        } catch (cause: CancellationException) {
+            throw cause
+        } catch (_: Exception) {
+            null
+        }
+        return qrc ?: fetchLrc(candidate)
     }
 
     private suspend fun fetchNativeQrc(candidate: LyricsCandidate): SyncedLyrics {
@@ -135,6 +141,7 @@ class QqMusicLyricsSource(
 
     private companion object {
         const val QQ_MUSICU_URL = "https://u.y.qq.com/cgi-bin/musicu.fcg"
+        const val QRC_ATTEMPT_BUDGET_MS = 1_200L
         val QQ_HEADERS = mapOf("Referer" to "https://y.qq.com/")
         val QQ_NATIVE_HEADERS = mapOf(
             "Cookie" to "tmeLoginType=-1;",

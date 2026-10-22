@@ -98,8 +98,12 @@ val generateFnConnectPayload by tasks.registering {
 val verifyFnConnectReleaseConfiguration by tasks.registering {
     description = "Verifies release connection configuration."
     doLast {
-        check(!fnConnectAuthxPrefix.orNull.isNullOrEmpty() && !fnConnectApiKey.orNull.isNullOrEmpty()) {
-            "Release connection configuration is missing."
+        // An absent pair is a valid state: the generated signer reports isConfigured=false and
+        // FNID lookups fail with a clear user-facing error while direct connections keep working.
+        val hasAuthxPrefix = !fnConnectAuthxPrefix.orNull.isNullOrEmpty()
+        val hasApiKey = !fnConnectApiKey.orNull.isNullOrEmpty()
+        check(hasAuthxPrefix == hasApiKey) {
+            "Connection signing configuration must be provided as a complete pair."
         }
     }
 }

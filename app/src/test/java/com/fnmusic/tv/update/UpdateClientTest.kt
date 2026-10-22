@@ -55,7 +55,7 @@ class UpdateClientTest {
     private fun manifest(apkUrl: String) = """
         {
           "schemaVersion": 1,
-          "packageName": "com.fnmusic.tv",
+          "packageName": "com.fnmusics.tv",
           "versionName": "1.0.6",
           "versionCode": 22,
           "title": "v1.0.6",

@@ -6,6 +6,7 @@ import com.fnmusic.tv.core.model.AppError
 import com.fnmusic.tv.core.model.AppException
 import java.io.IOException
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
@@ -14,9 +15,9 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.JsonElement
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.ConnectionPool
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
-import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -263,21 +264,20 @@ class TrimMusicApi(
 
     companion object {
         private const val MAX_RELAY_REDIRECTS = 5
+        private const val POOL_KEEP_ALIVE_MS = 30_000L
 
+        // FNOS nginx drops idle keep-alive sockets without notice. Connections retire after a
+        // window well inside that idle timeout, and transport retry transparently replaces a
+        // reused socket that died before a response, so no stale-connection error reaches callers.
         fun client(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .callTimeout(90, TimeUnit.SECONDS)
+            .connectionPool(ConnectionPool(5, POOL_KEEP_ALIVE_MS, TimeUnit.MILLISECONDS))
             .followRedirects(false)
             .followSslRedirects(false)
-            .retryOnConnectionFailure(false)
-            .addNetworkInterceptor { chain ->
-                val request = if (chain.connection()?.protocol() == Protocol.HTTP_1_1) {
-                    chain.request().newBuilder()
-                        .header("Connection", "close")
-                        .build()
-                } else {
-                    chain.request()
-                }
-                chain.proceed(request)
-            }
+            .retryOnConnectionFailure(true)
             .build()
     }
 }
